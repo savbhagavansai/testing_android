@@ -58,7 +58,7 @@ class GestureOverlayView @JvmOverloads constructor(
     private var cacheValid = false
 
     // PERFORMANCE MONITORING - Debug panel
-    private var showDebugPanel = false
+    private var showDebugPanel = true
     private var lastTapTime = 0L
     private var tapCount = 0
 
