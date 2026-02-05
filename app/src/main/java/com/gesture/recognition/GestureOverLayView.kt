@@ -9,8 +9,9 @@ import android.view.View
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 
 /**
- * Custom overlay view for drawing hand landmarks and gesture information
- * Simple version that works with your existing GestureRecognizer
+ * Custom overlay view for drawing hand landmarks, gestures, and performance metrics
+ *
+ * Complete implementation matching MainActivity requirements
  */
 class GestureOverlayView @JvmOverloads constructor(
     context: Context,
@@ -40,10 +41,19 @@ class GestureOverlayView @JvmOverloads constructor(
         )
     }
 
-    // State
-    private var gestureResult: GestureResult? = null
-    private var landmarks: FloatArray? = null
+    // State variables
+    private var handLandmarks: HandLandmarkerResult? = null
+    private var currentGesture: String = "None"
+    private var gestureConfidence: Float = 0f
+    private var allProbabilities: FloatArray = FloatArray(Config.NUM_CLASSES) { 0f }
+    private var bufferSize: Int = 0
+    private var isHandDetected: Boolean = false
     private var fps: Float = 0f
+    private var frameCount: Int = 0
+
+    // Performance metrics
+    private var mediaPipeMs: Float = 0f
+    private var onnxMs: Float = 0f
 
     // Paint objects
     private val landmarkPaint = Paint().apply {
@@ -61,139 +71,209 @@ class GestureOverlayView @JvmOverloads constructor(
 
     private val textPaint = Paint().apply {
         color = Color.WHITE
-        textSize = 48f
+        textSize = 28f
+        isAntiAlias = true
+    }
+
+    private val titlePaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 36f
         isAntiAlias = true
         isFakeBoldText = true
-        setShadowLayer(4f, 2f, 2f, Color.BLACK)
     }
 
-    private val smallTextPaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 32f
+    private val backgroundPaint = Paint().apply {
+        color = Color.argb(230, 0, 0, 0)
+        style = Paint.Style.FILL
         isAntiAlias = true
-        setShadowLayer(3f, 1f, 1f, Color.BLACK)
+    }
+
+    init {
+        setWillNotDraw(false)
     }
 
     /**
-     * Update with gesture result
+     * Update hand landmarks from MediaPipe
      */
-    fun updateGestureResult(result: GestureResult?) {
-        gestureResult = result
+    fun updateHandLandmarks(result: HandLandmarkerResult?) {
+        handLandmarks = result
+        isHandDetected = result?.landmarks()?.isNotEmpty() == true
         invalidate()
     }
 
     /**
-     * Update with landmarks for drawing
+     * Update gesture prediction results
      */
-    fun updateLandmarks(landmarks: FloatArray?) {
-        this.landmarks = landmarks
+    fun updateGesture(gesture: String, confidence: Float, probabilities: FloatArray) {
+        currentGesture = gesture
+        gestureConfidence = confidence
+        allProbabilities = probabilities
         invalidate()
     }
 
     /**
-     * Update FPS
+     * Update buffer status
      */
-    fun updateFPS(fps: Float) {
-        this.fps = fps
+    fun updateBuffer(size: Int) {
+        bufferSize = size
         invalidate()
     }
 
+    /**
+     * Update FPS counter
+     */
+    fun updateFPS(currentFps: Float, frame: Int) {
+        fps = currentFps
+        frameCount = frame
+        invalidate()
+    }
+
+    /**
+     * Update performance metrics
+     */
+    fun updatePerformanceMetrics(mediaPipeTime: Float, onnxTime: Float) {
+        mediaPipeMs = mediaPipeTime
+        onnxMs = onnxTime
+        invalidate()
+    }
+
+    /**
+     * Main drawing method
+     */
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
         try {
-            // Draw hand skeleton if available
+            // Draw in order
             drawHandSkeleton(canvas)
-
-            // Draw gesture info
-            drawGestureInfo(canvas)
-
-            // Draw FPS
-            drawFPS(canvas)
-
+            drawTopPanel(canvas)
+            drawBottomInfo(canvas)
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Error drawing overlay", e)
         }
     }
 
     /**
-     * Draw hand skeleton
+     * Draw hand skeleton (landmarks + connections)
      */
     private fun drawHandSkeleton(canvas: Canvas) {
-        val lm = landmarks ?: return
-        if (lm.size != 63) return
-
-        val w = width.toFloat()
-        val h = height.toFloat()
+        val landmarks = handLandmarks?.landmarks()?.firstOrNull() ?: return
 
         // Draw connections
         for ((start, end) in HAND_CONNECTIONS) {
-            if (start * 3 + 2 < lm.size && end * 3 + 2 < lm.size) {
-                val x1 = lm[start * 3] * w
-                val y1 = lm[start * 3 + 1] * h
-                val x2 = lm[end * 3] * w
-                val y2 = lm[end * 3 + 1] * h
+            if (start < landmarks.size && end < landmarks.size) {
+                val startLandmark = landmarks[start]
+                val endLandmark = landmarks[end]
 
-                canvas.drawLine(x1, y1, x2, y2, connectionPaint)
+                canvas.drawLine(
+                    startLandmark.x() * width,
+                    startLandmark.y() * height,
+                    endLandmark.x() * width,
+                    endLandmark.y() * height,
+                    connectionPaint
+                )
             }
         }
 
         // Draw landmarks
-        for (i in 0 until 21) {
-            val x = lm[i * 3] * w
-            val y = lm[i * 3 + 1] * h
-            canvas.drawCircle(x, y, LANDMARK_RADIUS, landmarkPaint)
+        for (landmark in landmarks) {
+            canvas.drawCircle(
+                landmark.x() * width,
+                landmark.y() * height,
+                LANDMARK_RADIUS,
+                landmarkPaint
+            )
         }
     }
 
     /**
-     * Draw gesture information
+     * Draw top panel (hand status, gesture, buffer)
      */
-    private fun drawGestureInfo(canvas: Canvas) {
-        val result = gestureResult ?: return
+    private fun drawTopPanel(canvas: Canvas) {
+        val panelX = 40f
+        val panelY = 50f
+        val panelWidth = 350f
+        val panelHeight = 180f
 
-        var y = 100f
+        // Background
+        canvas.drawRoundRect(
+            panelX, panelY,
+            panelX + panelWidth,
+            panelY + panelHeight,
+            20f, 20f,
+            backgroundPaint
+        )
 
-        // Gesture name
-        if (result.handDetected) {
-            val gesture = result.gesture.replace('_', ' ').uppercase()
-            textPaint.color = if (result.confidence > 0.6f) Color.GREEN else Color.YELLOW
-            canvas.drawText(gesture, 40f, y, textPaint)
-            y += 60f
+        var textY = panelY + 40f
+
+        // Hand detection status
+        val handStatus = if (isHandDetected) "✓ HAND DETECTED" else "✗ NO HAND"
+        val handColor = if (isHandDetected) Color.GREEN else Color.RED
+        textPaint.color = handColor
+        canvas.drawText(handStatus, panelX + 20f, textY, textPaint)
+        textY += 35f
+
+        // Buffer status
+        textPaint.color = Color.WHITE
+        canvas.drawText("Buffer: $bufferSize/${Config.SEQUENCE_LENGTH}", panelX + 20f, textY, textPaint)
+        textY += 35f
+
+        // Current gesture
+        if (isHandDetected && currentGesture != "None") {
+            val gestureColor = if (gestureConfidence > Config.CONFIDENCE_THRESHOLD) {
+                Color.GREEN
+            } else {
+                Color.YELLOW
+            }
+            textPaint.color = gestureColor
+            canvas.drawText(
+                "GESTURE: ${currentGesture.replace('_', ' ').uppercase()}",
+                panelX + 20f,
+                textY,
+                textPaint
+            )
+            textY += 35f
 
             // Confidence
-            smallTextPaint.color = Color.WHITE
+            textPaint.color = Color.WHITE
+            textPaint.textSize = 24f
             canvas.drawText(
-                "Confidence: ${(result.confidence * 100).toInt()}%",
-                40f, y, smallTextPaint
+                "Confidence: ${(gestureConfidence * 100).toInt()}%",
+                panelX + 20f,
+                textY,
+                textPaint
             )
-            y += 50f
-
-            // Buffer progress
-            if (result.bufferProgress < 1f) {
-                canvas.drawText(
-                    "Buffering: ${(result.bufferProgress * 100).toInt()}%",
-                    40f, y, smallTextPaint
-                )
-            }
-        } else {
-            textPaint.color = Color.RED
-            canvas.drawText("NO HAND", 40f, y, textPaint)
+            textPaint.textSize = 28f
         }
     }
 
     /**
-     * Draw FPS counter
+     * Draw bottom info (FPS, performance)
      */
-    private fun drawFPS(canvas: Canvas) {
-        if (fps > 0) {
-            smallTextPaint.color = Color.YELLOW
+    private fun drawBottomInfo(canvas: Canvas) {
+        val y = height - 100f
+
+        // FPS
+        textPaint.color = Color.YELLOW
+        textPaint.textSize = 32f
+        canvas.drawText("FPS: %.1f".format(fps), 40f, y, textPaint)
+
+        // Frame count
+        textPaint.textSize = 24f
+        canvas.drawText("Frame: $frameCount", 40f, y + 35f, textPaint)
+
+        // Performance metrics
+        if (mediaPipeMs > 0 || onnxMs > 0) {
+            textPaint.textSize = 20f
+            textPaint.color = Color.CYAN
             canvas.drawText(
-                "FPS: %.1f".format(fps),
-                width - 200f,
-                50f,
-                smallTextPaint
+                "MP: %.1fms | ONNX: %.1fms".format(mediaPipeMs, onnxMs),
+                40f,
+                y + 60f,
+                textPaint
             )
         }
+
+        textPaint.textSize = 28f
     }
 }
