@@ -1,521 +1,388 @@
 package com.gesture.recognition
 
 import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
-import android.util.AttributeSet
-import android.view.GestureDetector
-import android.view.MotionEvent
-import android.view.View
+import android.graphics.Bitmap
+import android.util.Log
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.MPImage
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import java.util.*
 import kotlin.math.max
 
 /**
- * Custom overlay view for drawing hand landmarks, gestures, and performance metrics
+ * Complete Gesture Recognizer
+ * Integrates MediaPipe + ONNX for real-time gesture recognition
  *
- * FIXES APPLIED (2026-02-05):
- * 1. ✅ Changed draw order - debug panel now drawn LAST (on top)
- * 2. ✅ Bright orange background - impossible to miss
- * 3. ✅ Moved to Y=700px - clear space below hand
+ * Pipeline:
+ * 1. Detect hand landmarks (MediaPipe)
+ * 2. Normalize landmarks
+ * 3. Buffer 15 frames
+ * 4. Run ONNX inference
+ * 5. Smooth predictions
  */
-class GestureOverlayView @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
+class GestureRecognizer(private val context: Context) {
 
     companion object {
-        private const val TAG = "GestureOverlay"
-
-        // Hand landmark drawing
-        private const val LANDMARK_RADIUS = 8f
-        private const val CONNECTION_THICKNESS = 4f
-
-        // UI dimensions
-        private const val PANEL_CORNER_RADIUS = 20f
-        private const val PROB_BAR_HEIGHT = 20f
-        private const val PROB_BAR_SPACING = 8f
-
-        // MediaPipe hand connections (21 landmarks form these connections)
-        private val HAND_CONNECTIONS = listOf(
-            // Thumb
-            0 to 1, 1 to 2, 2 to 3, 3 to 4,
-            // Index finger
-            0 to 5, 5 to 6, 6 to 7, 7 to 8,
-            // Middle finger
-            0 to 9, 9 to 10, 10 to 11, 11 to 12,
-            // Ring finger
-            0 to 13, 13 to 14, 14 to 15, 15 to 16,
-            // Pinky
-            0 to 17, 17 to 18, 18 to 19, 19 to 20,
-            // Palm
-            5 to 9, 9 to 13, 13 to 17
-        )
+        private const val TAG = "GestureRecognizer"
     }
 
-    // State variables
-    private var handLandmarks: HandLandmarkerResult? = null
-    private var currentGesture: String = "None"
-    private var gestureConfidence: Float = 0f
-    private var allProbabilities: FloatArray = FloatArray(11) { 0f }
-    private var bufferSize: Int = 0
-    private var isHandDetected: Boolean = false
-    private var fps: Float = 0f
-    private var frameCount: Int = 0
+    // MediaPipe
+    private var handLandmarker: HandLandmarker? = null
 
-    // Performance metrics
-    private var mediaPipeMs: Float = 0f
-    private var onnxMs: Float = 0f
-    private var showDebugPanel: Boolean = false
+    // ONNX Runtime
+    private var ortEnvironment: OrtEnvironment? = null
+    private var onnxSession: OrtSession? = null
 
-    // Paint objects (reused for efficiency)
-    private val landmarkPaint = Paint().apply {
-        color = Color.RED
-        style = Paint.Style.FILL
-        isAntiAlias = true
+    // Landmark buffer (stores last 15 frames)
+    private val landmarkBuffer = ArrayDeque<FloatArray>(Config.SEQUENCE_LENGTH)
+
+    // Prediction smoothing (stores last 5 predictions)
+    private val predictionBuffer = ArrayDeque<String>(Config.SMOOTHING_WINDOW)
+
+    // Performance tracking
+    private var mediaPipeTime = 0f
+    private var onnxTime = 0f
+
+    /**
+     * Initialize MediaPipe and ONNX Runtime
+     */
+    fun initialize(): Boolean {
+        return try {
+            initializeMediaPipe()
+            initializeONNX()
+            Log.d(TAG, "GestureRecognizer initialized successfully")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize GestureRecognizer", e)
+            false
+        }
     }
 
-    private val connectionPaint = Paint().apply {
-        color = Color.GREEN
-        style = Paint.Style.STROKE
-        strokeWidth = CONNECTION_THICKNESS
-        isAntiAlias = true
+    /**
+     * Initialize MediaPipe Hand Landmarker
+     */
+    private fun initializeMediaPipe() {
+        try {
+            val baseOptions = BaseOptions.builder()
+                .setModelAssetPath("hand_landmarker.task")
+                .build()
+
+            val options = HandLandmarker.HandLandmarkerOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.IMAGE)
+                .setNumHands(1)
+                .setMinHandDetectionConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                .setMinHandPresenceConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                .setMinTrackingConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                .build()
+
+            handLandmarker = HandLandmarker.createFromOptions(context, options)
+            Log.d(TAG, "MediaPipe Hand Landmarker initialized")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing MediaPipe", e)
+            throw e
+        }
     }
 
-    private val textPaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 28f
-        isAntiAlias = true
+    /**
+     * Initialize ONNX Runtime and load model
+     */
+    private fun initializeONNX() {
+        try {
+            ortEnvironment = OrtEnvironment.getEnvironment()
+
+            // Load model from assets
+            val modelBytes = context.assets.open("gesture_model.onnx").readBytes()
+            onnxSession = ortEnvironment?.createSession(modelBytes)
+
+            Log.d(TAG, "ONNX Runtime initialized, model loaded")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing ONNX Runtime", e)
+            throw e
+        }
     }
 
-    private val titlePaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 36f
-        isAntiAlias = true
-        isFakeBoldText = true
+    /**
+     * Process a bitmap and recognize gesture
+     */
+    fun recognizeGesture(bitmap: Bitmap): GestureResult {
+        try {
+            // Step 1: Detect hand landmarks with MediaPipe
+            val mediaPipeStart = System.currentTimeMillis()
+            val mpImage = BitmapImageBuilder(bitmap).build()
+            val result = handLandmarker?.detect(mpImage)
+            mediaPipeTime = (System.currentTimeMillis() - mediaPipeStart).toFloat()
+
+            // Step 2: Check if hand detected
+            if (result == null || result.landmarks().isEmpty()) {
+                return GestureResult(
+                    gesture = "None",
+                    confidence = 0f,
+                    probabilities = FloatArray(Config.NUM_CLASSES) { 0f },
+                    handDetected = false,
+                    bufferProgress = landmarkBuffer.size.toFloat() / Config.SEQUENCE_LENGTH,
+                    mediaPipeTime = mediaPipeTime,
+                    onnxTime = 0f
+                )
+            }
+
+            // Step 3: Extract and normalize landmarks
+            val landmarks = result.landmarks().first()
+            val normalizedLandmarks = extractAndNormalizeLandmarks(landmarks)
+
+            // Step 4: Add to buffer
+            if (landmarkBuffer.size >= Config.SEQUENCE_LENGTH) {
+                landmarkBuffer.removeFirst()
+            }
+            landmarkBuffer.addLast(normalizedLandmarks)
+
+            // Step 5: Check if buffer is full
+            if (landmarkBuffer.size < Config.SEQUENCE_LENGTH) {
+                return GestureResult(
+                    gesture = "Buffering",
+                    confidence = 0f,
+                    probabilities = FloatArray(Config.NUM_CLASSES) { 0f },
+                    handDetected = true,
+                    bufferProgress = landmarkBuffer.size.toFloat() / Config.SEQUENCE_LENGTH,
+                    mediaPipeTime = mediaPipeTime,
+                    onnxTime = 0f
+                )
+            }
+
+            // Step 6: Run ONNX inference
+            val onnxStart = System.currentTimeMillis()
+            val (gesture, confidence, probabilities) = runInference()
+            onnxTime = (System.currentTimeMillis() - onnxStart).toFloat()
+
+            // Step 7: Smooth prediction
+            val smoothedGesture = smoothPrediction(gesture, confidence)
+
+            return GestureResult(
+                gesture = smoothedGesture,
+                confidence = confidence,
+                probabilities = probabilities,
+                handDetected = true,
+                bufferProgress = 1f,
+                mediaPipeTime = mediaPipeTime,
+                onnxTime = onnxTime
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error recognizing gesture", e)
+            return GestureResult(
+                gesture = "Error",
+                confidence = 0f,
+                probabilities = FloatArray(Config.NUM_CLASSES) { 0f },
+                handDetected = false,
+                bufferProgress = 0f,
+                mediaPipeTime = 0f,
+                onnxTime = 0f
+            )
+        }
     }
 
-    private val subtitlePaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 24f
-        isAntiAlias = true
-    }
-
-    private val smallTextPaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 22f
-        isAntiAlias = true
-    }
-
-    private val backgroundPaint = Paint().apply {
-        color = Color.argb(230, 0, 0, 0)
-        style = Paint.Style.FILL
-        isAntiAlias = true
-    }
-
-    private val barPaint = Paint().apply {
-        style = Paint.Style.FILL
-        isAntiAlias = true
-    }
-
-    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-        override fun onDoubleTap(e: MotionEvent): Boolean {
-            // Double tap handled by MainActivity
-            return true
+    /**
+     * Extract landmarks and normalize using exact Python training logic
+     */
+    private fun extractAndNormalizeLandmarks(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): FloatArray {
+        // Step 1: Extract raw landmarks (21 landmarks × 3 coords = 63 features)
+        val rawLandmarks = FloatArray(63)
+        landmarks.forEachIndexed { index, landmark ->
+            rawLandmarks[index * 3] = landmark.x()
+            rawLandmarks[index * 3 + 1] = landmark.y()
+            rawLandmarks[index * 3 + 2] = landmark.z()
         }
 
-        override fun onLongPress(e: MotionEvent) {
-            // Toggle debug panel on long press
-            showDebugPanel = !showDebugPanel
-            invalidate()
-        }
-    })
+        // Step 2: Normalize (exact match with Python training)
+        val normalized = FloatArray(63)
 
-    init {
-        setWillNotDraw(false)
+        // Get wrist position (landmark 0)
+        val wristX = rawLandmarks[0]
+        val wristY = rawLandmarks[1]
+        val wristZ = rawLandmarks[2]
+
+        // Make wrist-relative
+        for (i in 0 until 21) {
+            normalized[i * 3] = rawLandmarks[i * 3] - wristX
+            normalized[i * 3 + 1] = rawLandmarks[i * 3 + 1] - wristY
+            normalized[i * 3 + 2] = rawLandmarks[i * 3 + 2] - wristZ
+        }
+
+        // Calculate scale
+        var maxX = 0f
+        var minX = 0f
+        var maxY = 0f
+        var minY = 0f
+
+        for (i in 0 until 21) {
+            val x = normalized[i * 3]
+            val y = normalized[i * 3 + 1]
+            maxX = max(maxX, x)
+            minX = kotlin.math.min(minX, x)
+            maxY = max(maxY, y)
+            minY = kotlin.math.min(minY, y)
+        }
+
+        val rangeX = maxX - minX
+        val rangeY = maxY - minY
+        val scale = max(rangeX, rangeY)
+
+        // Scale if hand is large enough
+        if (scale > Config.MIN_HAND_SCALE) {
+            for (i in 0 until 63) {
+                normalized[i] /= scale
+            }
+        }
+
+        // Clip values
+        for (i in 0 until 63) {
+            normalized[i] = normalized[i].coerceIn(
+                -Config.NORMALIZATION_CLIP_RANGE,
+                Config.NORMALIZATION_CLIP_RANGE
+            )
+        }
+
+        return normalized
     }
 
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        gestureDetector.onTouchEvent(event)
+    /**
+     * Run ONNX inference on buffered landmarks
+     */
+    private fun runInference(): Triple<String, Float, FloatArray> {
+        try {
+            // Prepare input tensor (1, 15, 63)
+            val inputData = Array(1) {
+                Array(Config.SEQUENCE_LENGTH) { FloatArray(Config.NUM_FEATURES) }
+            }
+
+            // Copy landmarks from buffer to tensor
+            landmarkBuffer.forEachIndexed { timeStep, landmarks ->
+                landmarks.forEachIndexed { featureIdx, value ->
+                    inputData[0][timeStep][featureIdx] = value
+                }
+            }
+
+            // Run inference
+            val outputs = onnxSession?.run(
+                mapOf("input" to OnnxTensor.createTensor(ortEnvironment, inputData))
+            )
+
+            // Get output probabilities
+            val outputTensor = outputs?.get(0)?.value as? Array<FloatArray>
+            if (outputTensor == null) {
+                Log.e(TAG, "Failed to get output tensor")
+                return Triple("Unknown", 0f, FloatArray(Config.NUM_CLASSES) { 0f })
+            }
+
+            val probabilities = outputTensor[0]
+
+            // Get prediction
+            val maxIndex = probabilities.indices.maxByOrNull { probabilities[it] } ?: 0
+            val confidence = probabilities[maxIndex]
+            val gesture = Config.LABEL_MAP[maxIndex] ?: "Unknown"
+
+            // Close output
+            outputs?.close()
+
+            return Triple(gesture, confidence, probabilities)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error running ONNX inference", e)
+            return Triple("Error", 0f, FloatArray(Config.NUM_CLASSES) { 0f })
+        }
+    }
+
+    /**
+     * Smooth predictions using majority voting
+     */
+    private fun smoothPrediction(gesture: String, confidence: Float): String {
+        // Add to buffer
+        if (predictionBuffer.size >= Config.SMOOTHING_WINDOW) {
+            predictionBuffer.removeFirst()
+        }
+        predictionBuffer.addLast(gesture)
+
+        // Use majority voting if confidence is high enough
+        return if (confidence > Config.CONFIDENCE_THRESHOLD && predictionBuffer.size >= 3) {
+            // Count occurrences
+            val counts = predictionBuffer.groupingBy { it }.eachCount()
+            counts.maxByOrNull { it.value }?.key ?: gesture
+        } else {
+            gesture
+        }
+    }
+
+    /**
+     * Get current buffer status
+     */
+    fun getBufferSize(): Int = landmarkBuffer.size
+
+    /**
+     * Clear all buffers
+     */
+    fun clearBuffers() {
+        landmarkBuffer.clear()
+        predictionBuffer.clear()
+    }
+
+    /**
+     * Get performance metrics
+     */
+    fun getPerformanceMetrics(): Pair<Float, Float> {
+        return Pair(mediaPipeTime, onnxTime)
+    }
+
+    /**
+     * Close and cleanup resources
+     */
+    fun close() {
+        try {
+            handLandmarker?.close()
+            onnxSession?.close()
+            Log.d(TAG, "GestureRecognizer closed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing GestureRecognizer", e)
+        }
+    }
+}
+
+/**
+ * Data class for gesture recognition results
+ */
+data class GestureResult(
+    val gesture: String,
+    val confidence: Float,
+    val probabilities: FloatArray,
+    val handDetected: Boolean,
+    val bufferProgress: Float,
+    val mediaPipeTime: Float,
+    val onnxTime: Float
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as GestureResult
+
+        if (gesture != other.gesture) return false
+        if (confidence != other.confidence) return false
+        if (!probabilities.contentEquals(other.probabilities)) return false
+        if (handDetected != other.handDetected) return false
+
         return true
     }
 
-    /**
-     * Update hand landmarks from MediaPipe
-     */
-    fun updateHandLandmarks(result: HandLandmarkerResult?) {
-        handLandmarks = result
-        isHandDetected = result?.landmarks()?.isNotEmpty() == true
-        invalidate()
-    }
-
-    /**
-     * Update gesture prediction results
-     */
-    fun updateGesture(gesture: String, confidence: Float, probabilities: FloatArray) {
-        currentGesture = gesture
-        gestureConfidence = confidence
-        allProbabilities = probabilities
-        invalidate()
-    }
-
-    /**
-     * Update buffer status
-     */
-    fun updateBuffer(size: Int) {
-        bufferSize = size
-        invalidate()
-    }
-
-    /**
-     * Update FPS counter
-     */
-    fun updateFPS(currentFps: Float, frame: Int) {
-        fps = currentFps
-        frameCount = frame
-        invalidate()
-    }
-
-    /**
-     * Update performance metrics
-     */
-    fun updatePerformanceMetrics(mediaPipeTime: Float, onnxTime: Float) {
-        mediaPipeMs = mediaPipeTime
-        onnxMs = onnxTime
-        invalidate()
-    }
-
-    /**
-     * Main drawing method
-     *
-     * ⭐ FIX #1: CHANGED DRAW ORDER
-     * Debug panel now drawn LAST to appear on top!
-     */
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-
-        try {
-            // Draw in order: back to front
-            drawHandSkeleton(canvas)
-            drawTopPanel(canvas)
-            drawProbabilityPanel(canvas)      // ← Draw probability FIRST
-            drawDebugPanel(canvas)             // ← Draw debug LAST (on top!) ⭐ FIX #1
-            drawBottomInstructions(canvas)
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "Error drawing overlay", e)
-        }
-    }
-
-    /**
-     * Draw hand skeleton (landmarks + connections)
-     */
-    private fun drawHandSkeleton(canvas: Canvas) {
-        val landmarks = handLandmarks?.landmarks()?.firstOrNull() ?: return
-
-        // Draw connections (lines between landmarks)
-        for ((start, end) in HAND_CONNECTIONS) {
-            if (start < landmarks.size && end < landmarks.size) {
-                val startLandmark = landmarks[start]
-                val endLandmark = landmarks[end]
-
-                canvas.drawLine(
-                    startLandmark.x() * width,
-                    startLandmark.y() * height,
-                    endLandmark.x() * width,
-                    endLandmark.y() * height,
-                    connectionPaint
-                )
-            }
-        }
-
-        // Draw landmarks (dots at each point)
-        for (landmark in landmarks) {
-            canvas.drawCircle(
-                landmark.x() * width,
-                landmark.y() * height,
-                LANDMARK_RADIUS,
-                landmarkPaint
-            )
-        }
-    }
-
-    /**
-     * Draw top-left panel (hand detection, buffer, gesture)
-     */
-    private fun drawTopPanel(canvas: Canvas) {
-        val panelX = 40f
-        val panelY = 50f
-        val panelWidth = 350f
-        val panelHeight = 160f
-
-        // Background
-        canvas.drawRoundRect(
-            panelX, panelY,
-            panelX + panelWidth,
-            panelY + panelHeight,
-            PANEL_CORNER_RADIUS,
-            PANEL_CORNER_RADIUS,
-            backgroundPaint
-        )
-
-        var textY = panelY + 40f
-
-        // Hand detection status
-        val handStatus = if (isHandDetected) "✓ HAND DETECTED" else "✗ NO HAND"
-        val handColor = if (isHandDetected) Color.GREEN else Color.RED
-        textPaint.color = handColor
-        canvas.drawText(handStatus, panelX + 20f, textY, textPaint)
-        textY += 35f
-
-        // Buffer status
-        textPaint.color = Color.WHITE
-        canvas.drawText("Buffer: $bufferSize/15", panelX + 20f, textY, textPaint)
-        textY += 35f
-
-        // Current gesture
-        if (isHandDetected && currentGesture != "None") {
-            val gestureColor = if (gestureConfidence > 0.6f) Color.GREEN else Color.YELLOW
-            textPaint.color = gestureColor
-            canvas.drawText("GESTURE: ${currentGesture.uppercase()}", panelX + 20f, textY, textPaint)
-            textY += 35f
-
-            // Confidence bar
-            val barWidth = 300f
-            val barX = panelX + 20f
-
-            // Background bar (gray)
-            barPaint.color = Color.GRAY
-            canvas.drawRoundRect(
-                barX, textY - 20f,
-                barX + barWidth, textY,
-                10f, 10f, barPaint
-            )
-
-            // Confidence bar (green/yellow based on threshold)
-            barPaint.color = gestureColor
-            canvas.drawRoundRect(
-                barX, textY - 20f,
-                barX + (barWidth * gestureConfidence), textY,
-                10f, 10f, barPaint
-            )
-
-            // Confidence percentage
-            textPaint.color = Color.WHITE
-            textPaint.textSize = 20f
-            canvas.drawText(
-                "${(gestureConfidence * 100).toInt()}%",
-                barX + barWidth + 10f,
-                textY - 5f,
-                textPaint
-            )
-            textPaint.textSize = 28f
-        }
-
-        // FPS counter (top right)
-        textPaint.color = Color.WHITE
-        canvas.drawText("FPS: %.1f".format(fps), width - 150f, 50f, textPaint)
-        canvas.drawText("Frame: $frameCount", width - 150f, 85f, textPaint)
-    }
-
-    /**
-     * Draw probability panel (right side)
-     */
-    private fun drawProbabilityPanel(canvas: Canvas) {
-        val panelWidth = 220f
-        val panelX = width - panelWidth - 40f
-        val panelY = 180f
-        val panelHeight = 50f + (allProbabilities.size * (PROB_BAR_HEIGHT + PROB_BAR_SPACING + 25f))
-
-        // Background
-        canvas.drawRoundRect(
-            panelX, panelY,
-            panelX + panelWidth,
-            panelY + panelHeight,
-            PANEL_CORNER_RADIUS,
-            PANEL_CORNER_RADIUS,
-            backgroundPaint
-        )
-
-        // Title
-        textPaint.color = Color.WHITE
-        canvas.drawText("Probabilities:", panelX + 15f, panelY + 35f, textPaint)
-
-        var itemY = panelY + 70f
-
-        // Gesture labels (from config)
-        val labels = listOf(
-            "doing other", "swipe left", "swipe right",
-            "thumb down", "thumb up", "v gesture",
-            "top", "left gesture", "right gesture",
-            "stop sign", "heart"
-        )
-
-        // Draw each probability
-        for (i in allProbabilities.indices) {
-            val prob = allProbabilities[i]
-            val label = labels.getOrNull(i) ?: "Unknown"
-
-            // Label
-            smallTextPaint.color = Color.WHITE
-            canvas.drawText(label, panelX + 15f, itemY, smallTextPaint)
-            itemY += 22f
-
-            // Probability bar
-            val barWidth = 180f
-            val barX = panelX + 15f
-
-            // Background (gray)
-            barPaint.color = Color.GRAY
-            canvas.drawRoundRect(
-                barX, itemY - PROB_BAR_HEIGHT,
-                barX + barWidth, itemY,
-                8f, 8f, barPaint
-            )
-
-            // Foreground (green if high, yellow if medium)
-            barPaint.color = when {
-                prob > 0.6f -> Color.GREEN
-                prob > 0.3f -> Color.YELLOW
-                else -> Color.rgb(100, 100, 100)
-            }
-            canvas.drawRoundRect(
-                barX, itemY - PROB_BAR_HEIGHT,
-                barX + (barWidth * prob), itemY,
-                8f, 8f, barPaint
-            )
-
-            // Percentage
-            smallTextPaint.color = Color.WHITE
-            smallTextPaint.textSize = 18f
-            canvas.drawText(
-                "${(prob * 100).toInt()}%",
-                barX + barWidth + 5f,
-                itemY - 5f,
-                smallTextPaint
-            )
-            smallTextPaint.textSize = 22f
-
-            itemY += PROB_BAR_SPACING + 8f
-        }
-    }
-
-    /**
-     * Draw performance debug panel (toggleable with long-press)
-     * Shows MediaPipe, ONNX timing and hardware status
-     *
-     * ⭐ FIX #2: BRIGHT ORANGE BACKGROUND (impossible to miss!)
-     * ⭐ FIX #3: MOVED TO Y=700px (clear space, no overlap!)
-     */
-    private fun drawDebugPanel(canvas: Canvas) {
-        if (!showDebugPanel) return
-
-        // DEBUG: Log when panel is being drawn
-        if (frameCount % 30 == 0) {
-            android.util.Log.d(TAG, "🎨 Drawing debug panel - MP:${String.format("%.1f", mediaPipeMs)}ms ONNX:${String.format("%.1f", onnxMs)}ms")
-        }
-
-        // ⭐ FIX #3: REPOSITIONED to Y=700px (clear space below hand)
-        val panelX = 40f
-        val panelY = 700f  // ← MOVED from 180f to 700f! ⭐
-        val panelWidth = width - 80f
-        val panelHeight = 280f  // Compact height
-
-        // ⭐ FIX #2: BRIGHT ORANGE BACKGROUND (fully opaque, impossible to miss!)
-        val brightBackgroundPaint = Paint().apply {
-            color = Color.argb(255, 255, 140, 0)  // ← Bright orange! ⭐
-            style = Paint.Style.FILL
-            isAntiAlias = true
-        }
-
-        // Draw bright orange background
-        canvas.drawRoundRect(
-            panelX, panelY,
-            panelX + panelWidth,
-            panelY + panelHeight,
-            PANEL_CORNER_RADIUS,
-            PANEL_CORNER_RADIUS,
-            brightBackgroundPaint
-        )
-
-        // Black border for extra visibility
-        val borderPaint = Paint().apply {
-            color = Color.BLACK
-            style = Paint.Style.STROKE
-            strokeWidth = 4f
-            isAntiAlias = true
-        }
-        canvas.drawRoundRect(
-            panelX, panelY,
-            panelX + panelWidth,
-            panelY + panelHeight,
-            PANEL_CORNER_RADIUS,
-            PANEL_CORNER_RADIUS,
-            borderPaint
-        )
-
-        var textY = panelY + 40f
-
-        // Title (black text on orange)
-        val debugTitlePaint = Paint().apply {
-            color = Color.BLACK
-            textSize = 32f
-            isAntiAlias = true
-            isFakeBoldText = true
-        }
-        canvas.drawText("⚡ PERFORMANCE DEBUG", panelX + 20f, textY, debugTitlePaint)
-        textY += 50f
-
-        // Black text for all content
-        val debugTextPaint = Paint().apply {
-            color = Color.BLACK
-            textSize = 24f
-            isAntiAlias = true
-        }
-
-        // MediaPipe timing
-        canvas.drawText("MediaPipe: ${String.format("%.1f", mediaPipeMs)} ms", panelX + 20f, textY, debugTextPaint)
-        textY += 35f
-
-        // ONNX timing
-        canvas.drawText("ONNX Inference: ${String.format("%.1f", onnxMs)} ms", panelX + 20f, textY, debugTextPaint)
-        textY += 35f
-
-        // Total pipeline time
-        val totalMs = mediaPipeMs + onnxMs
-        canvas.drawText("Total Pipeline: ${String.format("%.1f", totalMs)} ms", panelX + 20f, textY, debugTextPaint)
-        textY += 35f
-
-        // FPS
-        canvas.drawText("FPS: ${String.format("%.1f", fps)}", panelX + 20f, textY, debugTextPaint)
-        textY += 35f
-
-        // Performance indicator
-        val perfStatus = when {
-            totalMs < 50f -> "🟢 EXCELLENT"
-            totalMs < 100f -> "🟡 GOOD"
-            totalMs < 150f -> "🟠 FAIR"
-            else -> "🔴 SLOW"
-        }
-        debugTextPaint.isFakeBoldText = true
-        canvas.drawText("Status: $perfStatus", panelX + 20f, textY, debugTextPaint)
-    }
-
-    /**
-     * Draw bottom instructions
-     */
-    private fun drawBottomInstructions(canvas: Canvas) {
-        smallTextPaint.color = Color.WHITE
-        smallTextPaint.textSize = 20f
-        val text = "Double tap to switch camera • Long press for debug • Optimized for edge devices"
-        val textWidth = smallTextPaint.measureText(text)
-        canvas.drawText(
-            text,
-            (width - textWidth) / 2,
-            height - 40f,
-            smallTextPaint
-        )
-        smallTextPaint.textSize = 22f
+    override fun hashCode(): Int {
+        var result = gesture.hashCode()
+        result = 31 * result + confidence.hashCode()
+        result = 31 * result + probabilities.contentHashCode()
+        result = 31 * result + handDetected.hashCode()
+        return result
     }
 }
