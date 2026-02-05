@@ -4,6 +4,8 @@ package com.gesture.recognition
  * Configuration constants for gesture recognition
  *
  * These values match the Python training configuration exactly
+ *
+ * FIXED: Added IDX_TO_LABEL, LABEL_TO_IDX, and other missing constants
  */
 object Config {
 
@@ -24,6 +26,16 @@ object Config {
     const val TARGET_FPS = 30
     const val SMOOTHING_WINDOW = 5  // Number of predictions to smooth over
 
+    // MediaPipe Settings (for compatibility with MediaPipeProcessor)
+    const val MP_HANDS_CONFIDENCE = 0.5f
+    const val MP_HANDS_TRACKING_CONFIDENCE = 0.5f
+
+    // ONNX Model Settings (for compatibility with ONNXInference)
+    const val ONNX_MODEL_FILENAME = "gesture_model.onnx"
+
+    // Prediction Smoothing (for compatibility with PredictionSmoother)
+    const val PREDICTION_SMOOTHING_WINDOW = 5
+
     // Gesture Label Mapping (must match training labels)
     val LABEL_MAP = mapOf(
         0 to "doing_other_things",
@@ -38,6 +50,14 @@ object Config {
         9 to "stop_sign",
         10 to "heart"
     )
+
+    // ⭐ ADDED: Reverse mapping for compatibility (Index -> Label)
+    // This is what other files are looking for!
+    val IDX_TO_LABEL = LABEL_MAP
+
+    // ⭐ ADDED: Label to Index mapping (Label -> Index)
+    // Used by GestureRecognizer for smoothing
+    val LABEL_TO_IDX = LABEL_MAP.entries.associate { (k, v) -> v to k }
 
     // Display Names (user-friendly versions)
     val DISPLAY_NAMES = mapOf(
