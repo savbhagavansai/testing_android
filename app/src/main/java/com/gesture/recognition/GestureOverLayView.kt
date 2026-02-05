@@ -1,388 +1,199 @@
 package com.gesture.recognition
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.util.Log
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
-import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.framework.image.MPImage
-import com.google.mediapipe.tasks.core.BaseOptions
-import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.util.AttributeSet
+import android.view.View
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
-import java.util.*
-import kotlin.math.max
 
 /**
- * Complete Gesture Recognizer
- * Integrates MediaPipe + ONNX for real-time gesture recognition
- *
- * Pipeline:
- * 1. Detect hand landmarks (MediaPipe)
- * 2. Normalize landmarks
- * 3. Buffer 15 frames
- * 4. Run ONNX inference
- * 5. Smooth predictions
+ * Custom overlay view for drawing hand landmarks and gesture information
+ * Simple version that works with your existing GestureRecognizer
  */
-class GestureRecognizer(private val context: Context) {
+class GestureOverlayView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+    defStyleAttr: Int = 0
+) : View(context, attrs, defStyleAttr) {
 
     companion object {
-        private const val TAG = "GestureRecognizer"
+        private const val TAG = "GestureOverlay"
+        private const val LANDMARK_RADIUS = 8f
+        private const val CONNECTION_THICKNESS = 4f
+
+        // MediaPipe hand connections
+        private val HAND_CONNECTIONS = listOf(
+            // Thumb
+            0 to 1, 1 to 2, 2 to 3, 3 to 4,
+            // Index
+            0 to 5, 5 to 6, 6 to 7, 7 to 8,
+            // Middle
+            0 to 9, 9 to 10, 10 to 11, 11 to 12,
+            // Ring
+            0 to 13, 13 to 14, 14 to 15, 15 to 16,
+            // Pinky
+            0 to 17, 17 to 18, 18 to 19, 19 to 20,
+            // Palm
+            5 to 9, 9 to 13, 13 to 17
+        )
     }
 
-    // MediaPipe
-    private var handLandmarker: HandLandmarker? = null
+    // State
+    private var gestureResult: GestureResult? = null
+    private var landmarks: FloatArray? = null
+    private var fps: Float = 0f
 
-    // ONNX Runtime
-    private var ortEnvironment: OrtEnvironment? = null
-    private var onnxSession: OrtSession? = null
+    // Paint objects
+    private val landmarkPaint = Paint().apply {
+        color = Color.RED
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
 
-    // Landmark buffer (stores last 15 frames)
-    private val landmarkBuffer = ArrayDeque<FloatArray>(Config.SEQUENCE_LENGTH)
+    private val connectionPaint = Paint().apply {
+        color = Color.GREEN
+        style = Paint.Style.STROKE
+        strokeWidth = CONNECTION_THICKNESS
+        isAntiAlias = true
+    }
 
-    // Prediction smoothing (stores last 5 predictions)
-    private val predictionBuffer = ArrayDeque<String>(Config.SMOOTHING_WINDOW)
+    private val textPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 48f
+        isAntiAlias = true
+        isFakeBoldText = true
+        setShadowLayer(4f, 2f, 2f, Color.BLACK)
+    }
 
-    // Performance tracking
-    private var mediaPipeTime = 0f
-    private var onnxTime = 0f
+    private val smallTextPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 32f
+        isAntiAlias = true
+        setShadowLayer(3f, 1f, 1f, Color.BLACK)
+    }
 
     /**
-     * Initialize MediaPipe and ONNX Runtime
+     * Update with gesture result
      */
-    fun initialize(): Boolean {
-        return try {
-            initializeMediaPipe()
-            initializeONNX()
-            Log.d(TAG, "GestureRecognizer initialized successfully")
-            true
+    fun updateGestureResult(result: GestureResult?) {
+        gestureResult = result
+        invalidate()
+    }
+
+    /**
+     * Update with landmarks for drawing
+     */
+    fun updateLandmarks(landmarks: FloatArray?) {
+        this.landmarks = landmarks
+        invalidate()
+    }
+
+    /**
+     * Update FPS
+     */
+    fun updateFPS(fps: Float) {
+        this.fps = fps
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+
+        try {
+            // Draw hand skeleton if available
+            drawHandSkeleton(canvas)
+
+            // Draw gesture info
+            drawGestureInfo(canvas)
+
+            // Draw FPS
+            drawFPS(canvas)
+
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize GestureRecognizer", e)
-            false
+            android.util.Log.e(TAG, "Error drawing overlay", e)
         }
     }
 
     /**
-     * Initialize MediaPipe Hand Landmarker
+     * Draw hand skeleton
      */
-    private fun initializeMediaPipe() {
-        try {
-            val baseOptions = BaseOptions.builder()
-                .setModelAssetPath("hand_landmarker.task")
-                .build()
+    private fun drawHandSkeleton(canvas: Canvas) {
+        val lm = landmarks ?: return
+        if (lm.size != 63) return
 
-            val options = HandLandmarker.HandLandmarkerOptions.builder()
-                .setBaseOptions(baseOptions)
-                .setRunningMode(RunningMode.IMAGE)
-                .setNumHands(1)
-                .setMinHandDetectionConfidence(Config.MIN_DETECTION_CONFIDENCE)
-                .setMinHandPresenceConfidence(Config.MIN_DETECTION_CONFIDENCE)
-                .setMinTrackingConfidence(Config.MIN_DETECTION_CONFIDENCE)
-                .build()
+        val w = width.toFloat()
+        val h = height.toFloat()
 
-            handLandmarker = HandLandmarker.createFromOptions(context, options)
-            Log.d(TAG, "MediaPipe Hand Landmarker initialized")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing MediaPipe", e)
-            throw e
+        // Draw connections
+        for ((start, end) in HAND_CONNECTIONS) {
+            if (start * 3 + 2 < lm.size && end * 3 + 2 < lm.size) {
+                val x1 = lm[start * 3] * w
+                val y1 = lm[start * 3 + 1] * h
+                val x2 = lm[end * 3] * w
+                val y2 = lm[end * 3 + 1] * h
+
+                canvas.drawLine(x1, y1, x2, y2, connectionPaint)
+            }
+        }
+
+        // Draw landmarks
+        for (i in 0 until 21) {
+            val x = lm[i * 3] * w
+            val y = lm[i * 3 + 1] * h
+            canvas.drawCircle(x, y, LANDMARK_RADIUS, landmarkPaint)
         }
     }
 
     /**
-     * Initialize ONNX Runtime and load model
+     * Draw gesture information
      */
-    private fun initializeONNX() {
-        try {
-            ortEnvironment = OrtEnvironment.getEnvironment()
+    private fun drawGestureInfo(canvas: Canvas) {
+        val result = gestureResult ?: return
 
-            // Load model from assets
-            val modelBytes = context.assets.open("gesture_model.onnx").readBytes()
-            onnxSession = ortEnvironment?.createSession(modelBytes)
+        var y = 100f
 
-            Log.d(TAG, "ONNX Runtime initialized, model loaded")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing ONNX Runtime", e)
-            throw e
-        }
-    }
+        // Gesture name
+        if (result.handDetected) {
+            val gesture = result.gesture.replace('_', ' ').uppercase()
+            textPaint.color = if (result.confidence > 0.6f) Color.GREEN else Color.YELLOW
+            canvas.drawText(gesture, 40f, y, textPaint)
+            y += 60f
 
-    /**
-     * Process a bitmap and recognize gesture
-     */
-    fun recognizeGesture(bitmap: Bitmap): GestureResult {
-        try {
-            // Step 1: Detect hand landmarks with MediaPipe
-            val mediaPipeStart = System.currentTimeMillis()
-            val mpImage = BitmapImageBuilder(bitmap).build()
-            val result = handLandmarker?.detect(mpImage)
-            mediaPipeTime = (System.currentTimeMillis() - mediaPipeStart).toFloat()
+            // Confidence
+            smallTextPaint.color = Color.WHITE
+            canvas.drawText(
+                "Confidence: ${(result.confidence * 100).toInt()}%",
+                40f, y, smallTextPaint
+            )
+            y += 50f
 
-            // Step 2: Check if hand detected
-            if (result == null || result.landmarks().isEmpty()) {
-                return GestureResult(
-                    gesture = "None",
-                    confidence = 0f,
-                    probabilities = FloatArray(Config.NUM_CLASSES) { 0f },
-                    handDetected = false,
-                    bufferProgress = landmarkBuffer.size.toFloat() / Config.SEQUENCE_LENGTH,
-                    mediaPipeTime = mediaPipeTime,
-                    onnxTime = 0f
+            // Buffer progress
+            if (result.bufferProgress < 1f) {
+                canvas.drawText(
+                    "Buffering: ${(result.bufferProgress * 100).toInt()}%",
+                    40f, y, smallTextPaint
                 )
             }
-
-            // Step 3: Extract and normalize landmarks
-            val landmarks = result.landmarks().first()
-            val normalizedLandmarks = extractAndNormalizeLandmarks(landmarks)
-
-            // Step 4: Add to buffer
-            if (landmarkBuffer.size >= Config.SEQUENCE_LENGTH) {
-                landmarkBuffer.removeFirst()
-            }
-            landmarkBuffer.addLast(normalizedLandmarks)
-
-            // Step 5: Check if buffer is full
-            if (landmarkBuffer.size < Config.SEQUENCE_LENGTH) {
-                return GestureResult(
-                    gesture = "Buffering",
-                    confidence = 0f,
-                    probabilities = FloatArray(Config.NUM_CLASSES) { 0f },
-                    handDetected = true,
-                    bufferProgress = landmarkBuffer.size.toFloat() / Config.SEQUENCE_LENGTH,
-                    mediaPipeTime = mediaPipeTime,
-                    onnxTime = 0f
-                )
-            }
-
-            // Step 6: Run ONNX inference
-            val onnxStart = System.currentTimeMillis()
-            val (gesture, confidence, probabilities) = runInference()
-            onnxTime = (System.currentTimeMillis() - onnxStart).toFloat()
-
-            // Step 7: Smooth prediction
-            val smoothedGesture = smoothPrediction(gesture, confidence)
-
-            return GestureResult(
-                gesture = smoothedGesture,
-                confidence = confidence,
-                probabilities = probabilities,
-                handDetected = true,
-                bufferProgress = 1f,
-                mediaPipeTime = mediaPipeTime,
-                onnxTime = onnxTime
-            )
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error recognizing gesture", e)
-            return GestureResult(
-                gesture = "Error",
-                confidence = 0f,
-                probabilities = FloatArray(Config.NUM_CLASSES) { 0f },
-                handDetected = false,
-                bufferProgress = 0f,
-                mediaPipeTime = 0f,
-                onnxTime = 0f
-            )
-        }
-    }
-
-    /**
-     * Extract landmarks and normalize using exact Python training logic
-     */
-    private fun extractAndNormalizeLandmarks(landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): FloatArray {
-        // Step 1: Extract raw landmarks (21 landmarks × 3 coords = 63 features)
-        val rawLandmarks = FloatArray(63)
-        landmarks.forEachIndexed { index, landmark ->
-            rawLandmarks[index * 3] = landmark.x()
-            rawLandmarks[index * 3 + 1] = landmark.y()
-            rawLandmarks[index * 3 + 2] = landmark.z()
-        }
-
-        // Step 2: Normalize (exact match with Python training)
-        val normalized = FloatArray(63)
-
-        // Get wrist position (landmark 0)
-        val wristX = rawLandmarks[0]
-        val wristY = rawLandmarks[1]
-        val wristZ = rawLandmarks[2]
-
-        // Make wrist-relative
-        for (i in 0 until 21) {
-            normalized[i * 3] = rawLandmarks[i * 3] - wristX
-            normalized[i * 3 + 1] = rawLandmarks[i * 3 + 1] - wristY
-            normalized[i * 3 + 2] = rawLandmarks[i * 3 + 2] - wristZ
-        }
-
-        // Calculate scale
-        var maxX = 0f
-        var minX = 0f
-        var maxY = 0f
-        var minY = 0f
-
-        for (i in 0 until 21) {
-            val x = normalized[i * 3]
-            val y = normalized[i * 3 + 1]
-            maxX = max(maxX, x)
-            minX = kotlin.math.min(minX, x)
-            maxY = max(maxY, y)
-            minY = kotlin.math.min(minY, y)
-        }
-
-        val rangeX = maxX - minX
-        val rangeY = maxY - minY
-        val scale = max(rangeX, rangeY)
-
-        // Scale if hand is large enough
-        if (scale > Config.MIN_HAND_SCALE) {
-            for (i in 0 until 63) {
-                normalized[i] /= scale
-            }
-        }
-
-        // Clip values
-        for (i in 0 until 63) {
-            normalized[i] = normalized[i].coerceIn(
-                -Config.NORMALIZATION_CLIP_RANGE,
-                Config.NORMALIZATION_CLIP_RANGE
-            )
-        }
-
-        return normalized
-    }
-
-    /**
-     * Run ONNX inference on buffered landmarks
-     */
-    private fun runInference(): Triple<String, Float, FloatArray> {
-        try {
-            // Prepare input tensor (1, 15, 63)
-            val inputData = Array(1) {
-                Array(Config.SEQUENCE_LENGTH) { FloatArray(Config.NUM_FEATURES) }
-            }
-
-            // Copy landmarks from buffer to tensor
-            landmarkBuffer.forEachIndexed { timeStep, landmarks ->
-                landmarks.forEachIndexed { featureIdx, value ->
-                    inputData[0][timeStep][featureIdx] = value
-                }
-            }
-
-            // Run inference
-            val outputs = onnxSession?.run(
-                mapOf("input" to OnnxTensor.createTensor(ortEnvironment, inputData))
-            )
-
-            // Get output probabilities
-            val outputTensor = outputs?.get(0)?.value as? Array<FloatArray>
-            if (outputTensor == null) {
-                Log.e(TAG, "Failed to get output tensor")
-                return Triple("Unknown", 0f, FloatArray(Config.NUM_CLASSES) { 0f })
-            }
-
-            val probabilities = outputTensor[0]
-
-            // Get prediction
-            val maxIndex = probabilities.indices.maxByOrNull { probabilities[it] } ?: 0
-            val confidence = probabilities[maxIndex]
-            val gesture = Config.LABEL_MAP[maxIndex] ?: "Unknown"
-
-            // Close output
-            outputs?.close()
-
-            return Triple(gesture, confidence, probabilities)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error running ONNX inference", e)
-            return Triple("Error", 0f, FloatArray(Config.NUM_CLASSES) { 0f })
-        }
-    }
-
-    /**
-     * Smooth predictions using majority voting
-     */
-    private fun smoothPrediction(gesture: String, confidence: Float): String {
-        // Add to buffer
-        if (predictionBuffer.size >= Config.SMOOTHING_WINDOW) {
-            predictionBuffer.removeFirst()
-        }
-        predictionBuffer.addLast(gesture)
-
-        // Use majority voting if confidence is high enough
-        return if (confidence > Config.CONFIDENCE_THRESHOLD && predictionBuffer.size >= 3) {
-            // Count occurrences
-            val counts = predictionBuffer.groupingBy { it }.eachCount()
-            counts.maxByOrNull { it.value }?.key ?: gesture
         } else {
-            gesture
+            textPaint.color = Color.RED
+            canvas.drawText("NO HAND", 40f, y, textPaint)
         }
     }
 
     /**
-     * Get current buffer status
+     * Draw FPS counter
      */
-    fun getBufferSize(): Int = landmarkBuffer.size
-
-    /**
-     * Clear all buffers
-     */
-    fun clearBuffers() {
-        landmarkBuffer.clear()
-        predictionBuffer.clear()
-    }
-
-    /**
-     * Get performance metrics
-     */
-    fun getPerformanceMetrics(): Pair<Float, Float> {
-        return Pair(mediaPipeTime, onnxTime)
-    }
-
-    /**
-     * Close and cleanup resources
-     */
-    fun close() {
-        try {
-            handLandmarker?.close()
-            onnxSession?.close()
-            Log.d(TAG, "GestureRecognizer closed")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing GestureRecognizer", e)
+    private fun drawFPS(canvas: Canvas) {
+        if (fps > 0) {
+            smallTextPaint.color = Color.YELLOW
+            canvas.drawText(
+                "FPS: %.1f".format(fps),
+                width - 200f,
+                50f,
+                smallTextPaint
+            )
         }
-    }
-}
-
-/**
- * Data class for gesture recognition results
- */
-data class GestureResult(
-    val gesture: String,
-    val confidence: Float,
-    val probabilities: FloatArray,
-    val handDetected: Boolean,
-    val bufferProgress: Float,
-    val mediaPipeTime: Float,
-    val onnxTime: Float
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-
-        other as GestureResult
-
-        if (gesture != other.gesture) return false
-        if (confidence != other.confidence) return false
-        if (!probabilities.contentEquals(other.probabilities)) return false
-        if (handDetected != other.handDetected) return false
-
-        return true
-    }
-
-    override fun hashCode(): Int {
-        var result = gesture.hashCode()
-        result = 31 * result + confidence.hashCode()
-        result = 31 * result + probabilities.contentHashCode()
-        result = 31 * result + handDetected.hashCode()
-        return result
     }
 }
