@@ -22,6 +22,13 @@ class GestureOverlayView @JvmOverloads constructor(
 
     private val TAG = "GestureOverlayView"
 
+    init {
+        // CRITICAL: Make view clickable to receive touch events
+        isClickable = true
+        isFocusable = true
+        Log.d(TAG, "GestureOverlayView initialized - clickable enabled")
+    }
+
     // Data to display
     private var result: GestureResult? = null
     private var landmarks: FloatArray? = null
