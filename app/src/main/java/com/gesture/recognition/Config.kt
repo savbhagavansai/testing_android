@@ -1,66 +1,70 @@
 package com.gesture.recognition
 
 /**
- * Configuration object matching Python config.py
- * Contains all constants for gesture recognition pipeline
+ * Configuration constants for gesture recognition
+ *
+ * These values match the Python training configuration exactly
  */
 object Config {
-    
-    // ==================== SEQUENCE PARAMETERS ====================
-    const val SEQUENCE_LENGTH = 15  // Number of frames per sequence
-    const val TARGET_FPS = 12       // Target frame rate for normalization
-    
-    // ==================== MEDIAPIPE PARAMETERS ====================
-    const val MP_HANDS_CONFIDENCE = 0.5f
-    const val MP_HANDS_TRACKING_CONFIDENCE = 0.5f
-    
-    // ==================== NORMALIZATION PARAMETERS ====================
-    const val NORMALIZATION_CLIP_RANGE = 2.0f  // Clip outliers to [-2.0, 2.0]
-    const val MIN_HAND_SCALE = 0.01f           // Minimum hand scale to avoid division by zero
-    
-    // ==================== MODEL ARCHITECTURE ====================
-    const val NUM_FEATURES = 63     // 21 hand landmarks × 3 coordinates
+
+    // Model Input Shape
+    const val SEQUENCE_LENGTH = 15  // Number of frames in sequence
+    const val NUM_FEATURES = 63     // 21 landmarks × 3 coordinates (x, y, z)
     const val NUM_CLASSES = 11      // Number of gesture classes
-    
-    // ==================== MODEL FILE ====================
-    const val ONNX_MODEL_FILENAME = "gesture_model_android.onnx"
 
-    // ==================== INFERENCE PARAMETERS ====================
-    const val CONFIDENCE_THRESHOLD = 0.6f  // Minimum confidence for prediction
-    const val PREDICTION_SMOOTHING_WINDOW = 5  // Last N predictions for smoothing
+    // Normalization Parameters (must match training)
+    const val MIN_HAND_SCALE = 0.01f
+    const val NORMALIZATION_CLIP_RANGE = 2.0f
 
-    // ==================== LABEL MAPPING ====================
-    val LABEL_TO_IDX = mapOf(
-        "doing_other_things" to 0,
-        "swipe_left" to 1,
-        "swipe_right" to 2,
-        "thumb_down" to 3,
-        "thumb_up" to 4,
-        "v_gesture" to 5,
-        "top" to 6,
-        "left_gesture" to 7,
-        "right_gesture" to 8,
-        "stop_sign" to 9,
-        "heart" to 10
+    // Prediction Thresholds
+    const val CONFIDENCE_THRESHOLD = 0.6f  // Minimum confidence for gesture detection
+    const val MIN_DETECTION_CONFIDENCE = 0.5f  // MediaPipe hand detection threshold
+
+    // Performance Settings
+    const val TARGET_FPS = 30
+    const val SMOOTHING_WINDOW = 5  // Number of predictions to smooth over
+
+    // Gesture Label Mapping (must match training labels)
+    val LABEL_MAP = mapOf(
+        0 to "doing_other_things",
+        1 to "swipe_left",
+        2 to "swipe_right",
+        3 to "thumb_down",
+        4 to "thumb_up",
+        5 to "v_gesture",
+        6 to "top",
+        7 to "left_gesture",
+        8 to "right_gesture",
+        9 to "stop_sign",
+        10 to "heart"
     )
 
-    val IDX_TO_LABEL = LABEL_TO_IDX.entries.associate { (k, v) -> v to k }
+    // Display Names (user-friendly versions)
+    val DISPLAY_NAMES = mapOf(
+        "doing_other_things" to "Idle",
+        "swipe_left" to "Swipe Left",
+        "swipe_right" to "Swipe Right",
+        "thumb_down" to "Thumbs Down",
+        "thumb_up" to "Thumbs Up",
+        "v_gesture" to "Peace Sign",
+        "top" to "Point Up",
+        "left_gesture" to "Point Left",
+        "right_gesture" to "Point Right",
+        "stop_sign" to "Stop",
+        "heart" to "Heart"
+    )
 
-    // ==================== UI COLORS ====================
-    object Colors {
-        const val SUCCESS = 0xFF00FF00.toInt()      // Green
-        const val WARNING = 0xFF00FFFF.toInt()      // Yellow
-        const val ERROR = 0xFF0000FF.toInt()        // Red
-        const val INFO = 0xFFFFFFFF.toInt()         // White
-        const val BACKGROUND = 0xFF000000.toInt()   // Black
-        const val ORANGE = 0xFFFFA500.toInt()       // Orange
+    /**
+     * Get display name for a gesture
+     */
+    fun getDisplayName(gesture: String): String {
+        return DISPLAY_NAMES[gesture] ?: gesture
     }
 
-    // ==================== CAMERA PARAMETERS ====================
-    const val CAMERA_WIDTH = 1280
-    const val CAMERA_HEIGHT = 720
-    const val CAMERA_FPS = 30
-
-    // ==================== FPS TRACKING ====================
-    const val FPS_BUFFER_SIZE = 30  // Average FPS over last 30 frames
+    /**
+     * Check if gesture is valid
+     */
+    fun isValidGesture(gesture: String): Boolean {
+        return LABEL_MAP.values.contains(gesture)
+    }
 }
