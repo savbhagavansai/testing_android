@@ -345,7 +345,7 @@ class GestureOverlayView @JvmOverloads constructor(
 
         // Draw each gesture
         for (i in 0 until Config.NUM_CLASSES) {
-            val gestureName = Config.LABEL_MAP[i] ?: "unknown"
+            val gestureName = Config.IDX_TO_LABEL[i] ?: "unknown"
             val prob = if (i < result.allProbabilities.size) result.allProbabilities[i] else 0f
 
             val displayName = gestureName.replace('_', ' ').take(9)
