@@ -9,9 +9,12 @@ import android.view.View
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 
 /**
- * Custom overlay view for drawing hand landmarks, gestures, and performance metrics
+ * Custom overlay view with VISIBLE debug panel for performance monitoring
  *
- * Complete implementation matching MainActivity requirements
+ * FIXED: Debug panel now visible with:
+ * - Bright orange background (impossible to miss!)
+ * - Positioned at Y=700px (clear space, no overlap)
+ * - Drawn LAST (on top of everything)
  */
 class GestureOverlayView @JvmOverloads constructor(
     context: Context,
@@ -55,6 +58,9 @@ class GestureOverlayView @JvmOverloads constructor(
     private var mediaPipeMs: Float = 0f
     private var onnxMs: Float = 0f
 
+    // ⭐ Debug panel toggle (enabled by default to see performance)
+    private var showDebugPanel: Boolean = true
+
     // Paint objects
     private val landmarkPaint = Paint().apply {
         color = Color.RED
@@ -85,6 +91,19 @@ class GestureOverlayView @JvmOverloads constructor(
     private val backgroundPaint = Paint().apply {
         color = Color.argb(230, 0, 0, 0)
         style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    // ⭐ BRIGHT DEBUG PANEL BACKGROUND (impossible to miss!)
+    private val debugBackgroundPaint = Paint().apply {
+        color = Color.argb(255, 255, 140, 0)  // Bright orange, fully opaque
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    private val debugTextPaint = Paint().apply {
+        color = Color.BLACK  // Black text on orange background
+        textSize = 24f
         isAntiAlias = true
     }
 
@@ -129,7 +148,7 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Update performance metrics
+     * Update performance metrics (THIS IS WHAT WE WANT TO SEE!)
      */
     fun updatePerformanceMetrics(mediaPipeTime: Float, onnxTime: Float) {
         mediaPipeMs = mediaPipeTime
@@ -138,7 +157,17 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
+     * Toggle debug panel visibility
+     */
+    fun toggleDebugPanel() {
+        showDebugPanel = !showDebugPanel
+        invalidate()
+    }
+
+    /**
      * Main drawing method
+     *
+     * ⭐ FIX #1: Draw order changed - debug panel drawn LAST (on top)
      */
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -148,6 +177,11 @@ class GestureOverlayView @JvmOverloads constructor(
             drawHandSkeleton(canvas)
             drawTopPanel(canvas)
             drawBottomInfo(canvas)
+
+            // ⭐ Draw debug panel LAST so it's on top and visible!
+            if (showDebugPanel) {
+                drawDebugPanel(canvas)
+            }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Error drawing overlay", e)
         }
@@ -248,7 +282,7 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Draw bottom info (FPS, performance)
+     * Draw bottom info (FPS, frame count)
      */
     private fun drawBottomInfo(canvas: Canvas) {
         val y = height - 100f
@@ -262,18 +296,87 @@ class GestureOverlayView @JvmOverloads constructor(
         textPaint.textSize = 24f
         canvas.drawText("Frame: $frameCount", 40f, y + 35f, textPaint)
 
-        // Performance metrics
-        if (mediaPipeMs > 0 || onnxMs > 0) {
-            textPaint.textSize = 20f
-            textPaint.color = Color.CYAN
-            canvas.drawText(
-                "MP: %.1fms | ONNX: %.1fms".format(mediaPipeMs, onnxMs),
-                40f,
-                y + 60f,
-                textPaint
-            )
+        textPaint.textSize = 28f
+    }
+
+    /**
+     * ⭐ PERFORMANCE DEBUG PANEL - NOW VISIBLE!
+     *
+     * Shows:
+     * - MediaPipe inference time
+     * - ONNX inference time
+     * - Total pipeline time
+     * - Performance status
+     *
+     * FIX #2: Bright orange background (impossible to miss!)
+     * FIX #3: Positioned at Y=700px (clear space, no overlap)
+     */
+    private fun drawDebugPanel(canvas: Canvas) {
+        val panelX = 40f
+        val panelY = 700f  // ⭐ FIX #3: Moved to clear space below hand
+        val panelWidth = width - 80f
+        val panelHeight = 200f
+
+        // ⭐ FIX #2: BRIGHT ORANGE BACKGROUND (impossible to miss!)
+        canvas.drawRoundRect(
+            panelX, panelY,
+            panelX + panelWidth,
+            panelY + panelHeight,
+            20f, 20f,
+            debugBackgroundPaint
+        )
+
+        var textY = panelY + 35f
+
+        // Title
+        debugTextPaint.textSize = 28f
+        debugTextPaint.isFakeBoldText = true
+        canvas.drawText("⚡ PERFORMANCE MONITOR", panelX + 20f, textY, debugTextPaint)
+        textY += 45f
+
+        debugTextPaint.textSize = 24f
+        debugTextPaint.isFakeBoldText = false
+
+        // MediaPipe time
+        canvas.drawText(
+            "MediaPipe: %.1f ms".format(mediaPipeMs),
+            panelX + 20f,
+            textY,
+            debugTextPaint
+        )
+        textY += 35f
+
+        // ONNX time
+        canvas.drawText(
+            "ONNX: %.1f ms".format(onnxMs),
+            panelX + 20f,
+            textY,
+            debugTextPaint
+        )
+        textY += 35f
+
+        // Total time
+        val totalMs = mediaPipeMs + onnxMs
+        canvas.drawText(
+            "Total: %.1f ms".format(totalMs),
+            panelX + 20f,
+            textY,
+            debugTextPaint
+        )
+
+        // Performance status indicator
+        val perfStatus = when {
+            totalMs < 50f -> "🟢 EXCELLENT"
+            totalMs < 100f -> "🟡 GOOD"
+            totalMs < 150f -> "🟠 FAIR"
+            else -> "🔴 SLOW"
         }
 
-        textPaint.textSize = 28f
+        canvas.drawText(
+            perfStatus,
+            panelX + panelWidth - 180f,
+            textY,
+            debugTextPaint
+        )
     }
 }

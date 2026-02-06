@@ -2,11 +2,10 @@ package com.gesture.recognition
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.*
 import android.os.Bundle
 import android.util.Log
-import android.view.GestureDetector
 import android.view.MotionEvent
-import android.view.Surface
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -14,19 +13,18 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Main Activity - SIMPLIFIED VERSION
- * Uses GestureRecognizer class (which already works!)
- */
 class MainActivity : AppCompatActivity() {
 
-    companion object {
-        private const val TAG = "MainActivity"
-        private const val CAMERA_PERMISSION = Manifest.permission.CAMERA
-    }
+    private val TAG = "MainActivity"
 
     // UI Components
     private lateinit var previewView: PreviewView
@@ -35,35 +33,30 @@ class MainActivity : AppCompatActivity() {
     // Camera
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraExecutor: ExecutorService? = null
-    private var imageAnalyzer: ImageAnalysis? = null
-    private var camera: Camera? = null
-    private var lensFacing = CameraSelector.LENS_FACING_BACK
+    private var useFrontCamera = true  // Start with front camera for tablets
 
-    // ⭐ Use GestureRecognizer (this already works!)
+    // Gesture Recognition
     private var gestureRecognizer: GestureRecognizer? = null
 
-    // Performance Tracking
-    private var frameCount = 0
+    // FPS tracking
+    private val fpsBuffer = mutableListOf<Long>()
     private var lastFrameTime = System.currentTimeMillis()
-    private val fpsBuffer = ArrayDeque<Long>(30)
-    private var currentFps = 0f
+    private var frameCount = 0
 
-    // Gesture Detection
-    private val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-        override fun onDoubleTap(e: MotionEvent): Boolean {
-            switchCamera()
-            return true
-        }
-    })
+    // Frame processing control
+    private val isProcessing = AtomicBoolean(false)
+    private var frameSkipCounter = 0
 
-    // Permission Launcher
+    // Hand tracking state (thread-safe)
+    private val landmarksLock = Any()
+    @Volatile private var currentLandmarks: FloatArray? = null
+
+    // Permission launcher
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            if (initializeComponents()) {
-                startCamera()
-            }
+            startCamera()
         } else {
             Toast.makeText(this, "Camera permission required", Toast.LENGTH_LONG).show()
             finish()
@@ -72,69 +65,74 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
 
+        // Initialize UI
+        initializeViews()
+
+        // Initialize gesture recognizer
         try {
-            setContentView(R.layout.activity_main)
-
-            // Initialize UI
-            previewView = findViewById(R.id.previewView)
-            overlayView = findViewById(R.id.overlayView)
-
-            // Setup touch handler
-            previewView.setOnTouchListener { _, event ->
-                gestureDetector.onTouchEvent(event)
-                true
-            }
-
-            // Request camera permission
-            when {
-                ContextCompat.checkSelfPermission(this, CAMERA_PERMISSION) ==
-                    PackageManager.PERMISSION_GRANTED -> {
-                    if (initializeComponents()) {
-                        startCamera()
-                    }
-                }
-                else -> {
-                    requestPermissionLauncher.launch(CAMERA_PERMISSION)
-                }
-            }
-
-            Log.d(TAG, "MainActivity created")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in onCreate", e)
-            e.printStackTrace()
-            Toast.makeText(this, "Failed to start: ${e.message}", Toast.LENGTH_LONG).show()
-            finish()
-        }
-    }
-
-    /**
-     * Initialize GestureRecognizer
-     */
-    private fun initializeComponents(): Boolean {
-        return try {
-            Log.d(TAG, "Initializing GestureRecognizer...")
             gestureRecognizer = GestureRecognizer(this)
-            cameraExecutor = Executors.newSingleThreadExecutor()
-            Log.d(TAG, "✓ All components initialized")
-            true
+            Log.d(TAG, "GestureRecognizer initialized")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize", e)
-            e.printStackTrace()
-            Toast.makeText(
-                this,
-                "Initialization failed: ${e.message}",
-                Toast.LENGTH_LONG
-            ).show()
+            Log.e(TAG, "Failed to initialize GestureRecognizer", e)
+            Toast.makeText(this, "Failed to load model: ${e.message}", Toast.LENGTH_LONG).show()
             finish()
-            false
+            return
+        }
+
+        // Initialize camera executor
+        cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // Check camera permission
+        when {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                startCamera()
+            }
+            else -> {
+                requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
         }
     }
 
-    /**
-     * Start camera
-     */
+    private fun initializeViews() {
+        previewView = findViewById(R.id.previewView)
+        overlayView = findViewById(R.id.overlayView)
+
+        // Set preview scale type to match overlay
+        previewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+
+        // Double tap to switch camera
+        var lastTapTime = 0L
+        overlayView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_DOWN) {
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - lastTapTime < 300) {
+                    // Double tap detected
+                    switchCamera()
+                }
+                lastTapTime = currentTime
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    private fun switchCamera() {
+        useFrontCamera = !useFrontCamera
+        cameraProvider?.unbindAll()
+        startCamera()
+        Toast.makeText(
+            this,
+            if (useFrontCamera) "Front Camera" else "Back Camera",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
@@ -144,168 +142,224 @@ class MainActivity : AppCompatActivity() {
                 bindCameraUseCases()
             } catch (e: Exception) {
                 Log.e(TAG, "Camera initialization failed", e)
-                Toast.makeText(this, "Camera failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Camera error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
-    /**
-     * Bind camera use cases
-     */
     private fun bindCameraUseCases() {
-        val cameraProvider = cameraProvider ?: return
+        val provider = cameraProvider ?: return
 
-        cameraProvider.unbindAll()
+        provider.unbindAll()
 
-        val cameraSelector = CameraSelector.Builder()
-            .requireLensFacing(lensFacing)
-            .build()
-
-        // Get rotation safely
-        val rotation = try {
-            previewView.display?.rotation ?: Surface.ROTATION_0
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not get display rotation, using default", e)
-            Surface.ROTATION_0
-        }
-
-        // Preview
+        // Preview - lower resolution for edge devices
         val preview = Preview.Builder()
-            .setTargetRotation(rotation)
+            .setTargetResolution(android.util.Size(240, 180))  // Reduced for performance
             .build()
             .also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-        // Image analysis
-        imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetRotation(rotation)
+        // Image analysis - match preview resolution
+        val imageAnalyzer = ImageAnalysis.Builder()
+            .setTargetResolution(android.util.Size(240, 180))  // Reduced for performance
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also {
                 it.setAnalyzer(cameraExecutor!!) { imageProxy ->
-                    processFrame(imageProxy)
+                    processImageProxy(imageProxy)
                 }
             }
 
+        // Select camera
+        val cameraSelector = if (useFrontCamera) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
         try {
-            camera = cameraProvider.bindToLifecycle(
+            provider.bindToLifecycle(
                 this,
                 cameraSelector,
                 preview,
                 imageAnalyzer
             )
 
-            Log.d(TAG, "Camera bound successfully")
+            Log.d(TAG, "Camera bound: ${if (useFrontCamera) "Front" else "Back"}")
+
         } catch (e: Exception) {
-            Log.e(TAG, "Camera binding failed", e)
-            Toast.makeText(this, "Camera binding failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            Log.e(TAG, "Use case binding failed", e)
         }
     }
 
-    /**
-     * Process each frame using GestureRecognizer
-     */
-    private fun processFrame(imageProxy: ImageProxy) {
+    private fun processImageProxy(imageProxy: ImageProxy) {
+        // AGGRESSIVE FRAME DROPPING: Skip if still processing previous frame
+        if (!isProcessing.compareAndSet(false, true)) {
+            imageProxy.close()
+            return  // Drop this frame immediately
+        }
+
+        // FRAME SKIPPING: Process every 2nd frame for better performance
+        frameSkipCounter++
+        if (frameSkipCounter % 2 != 0) {
+            isProcessing.set(false)
+            imageProxy.close()
+            return
+        }
+
+        val currentTime = System.currentTimeMillis()
+        frameCount++
+
         try {
+            // Get image rotation from CameraX
+            val imageRotation = imageProxy.imageInfo.rotationDegrees
+
             val bitmap = imageProxy.toBitmap()
 
-            // ⭐ Use GestureRecognizer (which already works!)
-            val result = gestureRecognizer?.processFrame(bitmap)
+            if (bitmap != null) {
+                lifecycleScope.launch(Dispatchers.Default) {
+                    try {
+                        // Process frame with RAW landmarks (for model)
+                        val result = gestureRecognizer?.processFrame(bitmap)
 
-            if (result != null) {
-                // Update UI
-                runOnUiThread {
-                    // Update overlay with results
-                    overlayView.updateGesture(
-                        result.gesture,
-                        result.confidence,
-                        result.allProbabilities
-                    )
+                        // Get landmarks with thread safety
+                        val landmarks = synchronized(landmarksLock) {
+                            gestureRecognizer?.getLastLandmarks()?.copyOf()
+                        }
+                        currentLandmarks = landmarks
 
-                    overlayView.updateBuffer(
-                        (result.bufferProgress * Config.SEQUENCE_LENGTH).toInt()
-                    )
+                        // Calculate FPS
+                        val fps = calculateFPS(currentTime)
 
-                    overlayView.updatePerformanceMetrics(
-                        result.mediaPipeTimeMs.toFloat(),
-                        result.onnxTimeMs.toFloat()
-                    )
-
-                    // Update hand landmarks for skeleton drawing
-                    val landmarks = gestureRecognizer?.getLastLandmarks()
-                    if (landmarks != null) {
-                        updateHandLandmarksForDrawing(landmarks)
+                        // Update UI on main thread (pass rotation for display transformation)
+                        withContext(Dispatchers.Main) {
+                            try {
+                                updateOverlay(
+                                    result,
+                                    fps,
+                                    imageProxy.width,
+                                    imageProxy.height,
+                                    imageRotation,
+                                    useFrontCamera
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "UI update failed", e)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Frame processing error", e)
+                    } finally {
+                        isProcessing.set(false)
                     }
-
-                    // Update FPS
-                    updateFPS()
                 }
+            } else {
+                isProcessing.set(false)
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing frame", e)
+            Log.e(TAG, "Frame processing error", e)
+            isProcessing.set(false)
         } finally {
             imageProxy.close()
         }
     }
 
-    /**
-     * Update hand landmarks for overlay drawing
-     */
-    private fun updateHandLandmarksForDrawing(landmarks: FloatArray) {
-        // Convert raw landmarks to HandLandmarkerResult format for overlay
-        // For now, just skip the skeleton drawing if needed
-        // The gesture info will still show correctly
+    private fun ImageProxy.toBitmap(): Bitmap? {
+        return try {
+            // Optimized conversion with lower quality for speed
+            val yBuffer = planes[0].buffer
+            val uBuffer = planes[1].buffer
+            val vBuffer = planes[2].buffer
+
+            val ySize = yBuffer.remaining()
+            val uSize = uBuffer.remaining()
+            val vSize = vBuffer.remaining()
+
+            val nv21 = ByteArray(ySize + uSize + vSize)
+
+            yBuffer.get(nv21, 0, ySize)
+            vBuffer.get(nv21, ySize, vSize)
+            uBuffer.get(nv21, ySize + vSize, uSize)
+
+            val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+            val out = ByteArrayOutputStream()
+
+            // Lower quality for faster processing
+            yuvImage.compressToJpeg(Rect(0, 0, width, height), 75, out)
+            val imageBytes = out.toByteArray()
+
+            // Use RGB_565 for faster decoding
+            val options = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.RGB_565
+                inSampleSize = 1
+            }
+
+            BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, options)
+        } catch (e: Exception) {
+            Log.e(TAG, "Bitmap conversion failed", e)
+            null
+        }
     }
 
-    /**
-     * Update FPS
-     */
-    private fun updateFPS() {
-        val currentTime = System.currentTimeMillis()
-        val deltaTime = currentTime - lastFrameTime
+    private fun calculateFPS(currentTime: Long): Float {
+        val elapsed = currentTime - lastFrameTime
         lastFrameTime = currentTime
 
-        fpsBuffer.addLast(deltaTime)
-        if (fpsBuffer.size > 30) {
-            fpsBuffer.removeFirst()
+        if (elapsed > 0) {
+            val fps = 1000f / elapsed
+            fpsBuffer.add(fps.toLong())
+
+            if (fpsBuffer.size > 30) {
+                fpsBuffer.removeAt(0)
+            }
         }
 
-        if (fpsBuffer.size > 0) {
-            val avgDelta = fpsBuffer.average()
-            currentFps = 1000f / avgDelta.toFloat()
+        return if (fpsBuffer.isNotEmpty()) {
+            fpsBuffer.average().toFloat()
+        } else {
+            0f
         }
-
-        frameCount++
-        overlayView.updateFPS(currentFps, frameCount)
     }
 
-    /**
-     * Switch camera
-     */
-    private fun switchCamera() {
-        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-            CameraSelector.LENS_FACING_FRONT
-        } else {
-            CameraSelector.LENS_FACING_BACK
-        }
+    private fun updateOverlay(
+        result: GestureResult?,
+        fps: Float,
+        imageWidth: Int,
+        imageHeight: Int,
+        rotation: Int,
+        useFrontCamera: Boolean
+    ) {
+        try {
+            // Thread-safe landmark access
+            val landmarks = synchronized(landmarksLock) {
+                currentLandmarks?.copyOf()
+            }
 
-        bindCameraUseCases()
-        Toast.makeText(this, "Camera switched", Toast.LENGTH_SHORT).show()
+            overlayView.updateData(
+                result = result,
+                landmarks = landmarks,
+                fps = fps,
+                frameCount = frameCount,
+                bufferSize = gestureRecognizer?.getBufferSize() ?: 0,
+                handDetected = landmarks != null,
+                imageWidth = imageWidth,
+                imageHeight = imageHeight,
+                rotation = rotation,
+                mirrorHorizontal = useFrontCamera
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Overlay update failed", e)
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
-        try {
-            cameraExecutor?.shutdown()
-            gestureRecognizer?.close()
-            cameraProvider?.unbindAll()
+        cameraExecutor?.shutdown()
+        gestureRecognizer?.close()
+        cameraProvider?.unbindAll()
 
-            Log.d(TAG, "Resources cleaned up")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during cleanup", e)
-        }
+        Log.d(TAG, "MainActivity destroyed")
     }
 }
