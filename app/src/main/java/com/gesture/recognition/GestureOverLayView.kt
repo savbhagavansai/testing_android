@@ -6,15 +6,14 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.util.AttributeSet
 import android.view.View
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 
 /**
- * Custom overlay view with VISIBLE debug panel for performance monitoring
+ * Custom overlay view with updateData() method and VISIBLE debug panel
  *
- * FIXED: Debug panel now visible with:
- * - Bright orange background (impossible to miss!)
- * - Positioned at Y=700px (clear space, no overlap)
- * - Drawn LAST (on top of everything)
+ * FIXED:
+ * - Added updateData() method that MainActivity calls
+ * - Debug panel with bright orange background (impossible to miss!)
+ * - Shows MediaPipe and ONNX inference times
  */
 class GestureOverlayView @JvmOverloads constructor(
     context: Context,
@@ -29,37 +28,26 @@ class GestureOverlayView @JvmOverloads constructor(
 
         // MediaPipe hand connections
         private val HAND_CONNECTIONS = listOf(
-            // Thumb
             0 to 1, 1 to 2, 2 to 3, 3 to 4,
-            // Index
             0 to 5, 5 to 6, 6 to 7, 7 to 8,
-            // Middle
             0 to 9, 9 to 10, 10 to 11, 11 to 12,
-            // Ring
             0 to 13, 13 to 14, 14 to 15, 15 to 16,
-            // Pinky
             0 to 17, 17 to 18, 18 to 19, 19 to 20,
-            // Palm
             5 to 9, 9 to 13, 13 to 17
         )
     }
 
     // State variables
-    private var handLandmarks: HandLandmarkerResult? = null
-    private var currentGesture: String = "None"
-    private var gestureConfidence: Float = 0f
-    private var allProbabilities: FloatArray = FloatArray(Config.NUM_CLASSES) { 0f }
-    private var bufferSize: Int = 0
-    private var isHandDetected: Boolean = false
+    private var gestureResult: GestureResult? = null
+    private var landmarks: FloatArray? = null
     private var fps: Float = 0f
     private var frameCount: Int = 0
-
-    // Performance metrics
-    private var mediaPipeMs: Float = 0f
-    private var onnxMs: Float = 0f
-
-    // ⭐ Debug panel toggle (enabled by default to see performance)
-    private var showDebugPanel: Boolean = true
+    private var bufferSize: Int = 0
+    private var handDetected: Boolean = false
+    private var imageWidth: Int = 0
+    private var imageHeight: Int = 0
+    private var rotation: Int = 0
+    private var mirrorHorizontal: Boolean = false
 
     // Paint objects
     private val landmarkPaint = Paint().apply {
@@ -81,20 +69,13 @@ class GestureOverlayView @JvmOverloads constructor(
         isAntiAlias = true
     }
 
-    private val titlePaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 36f
-        isAntiAlias = true
-        isFakeBoldText = true
-    }
-
     private val backgroundPaint = Paint().apply {
         color = Color.argb(230, 0, 0, 0)
         style = Paint.Style.FILL
         isAntiAlias = true
     }
 
-    // ⭐ BRIGHT DEBUG PANEL BACKGROUND (impossible to miss!)
+    // ⭐ BRIGHT DEBUG PANEL BACKGROUND
     private val debugBackgroundPaint = Paint().apply {
         color = Color.argb(255, 255, 140, 0)  // Bright orange, fully opaque
         style = Paint.Style.FILL
@@ -112,111 +93,76 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Update hand landmarks from MediaPipe
+     * ⭐ Main update method that MainActivity calls
      */
-    fun updateHandLandmarks(result: HandLandmarkerResult?) {
-        handLandmarks = result
-        isHandDetected = result?.landmarks()?.isNotEmpty() == true
-        invalidate()
-    }
-
-    /**
-     * Update gesture prediction results
-     */
-    fun updateGesture(gesture: String, confidence: Float, probabilities: FloatArray) {
-        currentGesture = gesture
-        gestureConfidence = confidence
-        allProbabilities = probabilities
-        invalidate()
-    }
-
-    /**
-     * Update buffer status
-     */
-    fun updateBuffer(size: Int) {
-        bufferSize = size
-        invalidate()
-    }
-
-    /**
-     * Update FPS counter
-     */
-    fun updateFPS(currentFps: Float, frame: Int) {
-        fps = currentFps
-        frameCount = frame
-        invalidate()
-    }
-
-    /**
-     * Update performance metrics (THIS IS WHAT WE WANT TO SEE!)
-     */
-    fun updatePerformanceMetrics(mediaPipeTime: Float, onnxTime: Float) {
-        mediaPipeMs = mediaPipeTime
-        onnxMs = onnxTime
-        invalidate()
-    }
-
-    /**
-     * Toggle debug panel visibility
-     */
-    fun toggleDebugPanel() {
-        showDebugPanel = !showDebugPanel
+    fun updateData(
+        result: GestureResult?,
+        landmarks: FloatArray?,
+        fps: Float,
+        frameCount: Int,
+        bufferSize: Int,
+        handDetected: Boolean,
+        imageWidth: Int,
+        imageHeight: Int,
+        rotation: Int,
+        mirrorHorizontal: Boolean
+    ) {
+        this.gestureResult = result
+        this.landmarks = landmarks
+        this.fps = fps
+        this.frameCount = frameCount
+        this.bufferSize = bufferSize
+        this.handDetected = handDetected
+        this.imageWidth = imageWidth
+        this.imageHeight = imageHeight
+        this.rotation = rotation
+        this.mirrorHorizontal = mirrorHorizontal
         invalidate()
     }
 
     /**
      * Main drawing method
-     *
-     * ⭐ FIX #1: Draw order changed - debug panel drawn LAST (on top)
      */
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
         try {
-            // Draw in order
             drawHandSkeleton(canvas)
             drawTopPanel(canvas)
             drawBottomInfo(canvas)
-
-            // ⭐ Draw debug panel LAST so it's on top and visible!
-            if (showDebugPanel) {
-                drawDebugPanel(canvas)
-            }
+            drawDebugPanel(canvas)  // ⭐ Draw debug panel LAST (on top)
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Error drawing overlay", e)
         }
     }
 
     /**
-     * Draw hand skeleton (landmarks + connections)
+     * Draw hand skeleton
      */
     private fun drawHandSkeleton(canvas: Canvas) {
-        val landmarks = handLandmarks?.landmarks()?.firstOrNull() ?: return
+        val lm = landmarks ?: return
+        if (lm.size != 63) return
+
+        val w = width.toFloat()
+        val h = height.toFloat()
 
         // Draw connections
         for ((start, end) in HAND_CONNECTIONS) {
-            if (start < landmarks.size && end < landmarks.size) {
-                val startLandmark = landmarks[start]
-                val endLandmark = landmarks[end]
+            if (start * 3 + 2 < lm.size && end * 3 + 2 < lm.size) {
+                val x1 = lm[start * 3] * w
+                val y1 = lm[start * 3 + 1] * h
+                val x2 = lm[end * 3] * w
+                val y2 = lm[end * 3 + 1] * h
 
-                canvas.drawLine(
-                    startLandmark.x() * width,
-                    startLandmark.y() * height,
-                    endLandmark.x() * width,
-                    endLandmark.y() * height,
-                    connectionPaint
-                )
+                canvas.drawLine(x1, y1, x2, y2, connectionPaint)
             }
         }
 
         // Draw landmarks
-        for (landmark in landmarks) {
-            canvas.drawCircle(
-                landmark.x() * width,
-                landmark.y() * height,
-                LANDMARK_RADIUS,
-                landmarkPaint
-            )
+        for (i in 0 until 21) {
+            val x = lm[i * 3] * w
+            val y = lm[i * 3 + 1] * h
+            canvas.drawCircle(x, y, LANDMARK_RADIUS, landmarkPaint)
         }
     }
 
@@ -241,8 +187,8 @@ class GestureOverlayView @JvmOverloads constructor(
         var textY = panelY + 40f
 
         // Hand detection status
-        val handStatus = if (isHandDetected) "✓ HAND DETECTED" else "✗ NO HAND"
-        val handColor = if (isHandDetected) Color.GREEN else Color.RED
+        val handStatus = if (handDetected) "✓ HAND DETECTED" else "✗ NO HAND"
+        val handColor = if (handDetected) Color.GREEN else Color.RED
         textPaint.color = handColor
         canvas.drawText(handStatus, panelX + 20f, textY, textPaint)
         textY += 35f
@@ -253,15 +199,16 @@ class GestureOverlayView @JvmOverloads constructor(
         textY += 35f
 
         // Current gesture
-        if (isHandDetected && currentGesture != "None") {
-            val gestureColor = if (gestureConfidence > Config.CONFIDENCE_THRESHOLD) {
+        val result = gestureResult
+        if (result != null && handDetected) {
+            val gestureColor = if (result.confidence > Config.CONFIDENCE_THRESHOLD) {
                 Color.GREEN
             } else {
                 Color.YELLOW
             }
             textPaint.color = gestureColor
             canvas.drawText(
-                "GESTURE: ${currentGesture.replace('_', ' ').uppercase()}",
+                "GESTURE: ${result.gesture.replace('_', ' ').uppercase()}",
                 panelX + 20f,
                 textY,
                 textPaint
@@ -272,7 +219,7 @@ class GestureOverlayView @JvmOverloads constructor(
             textPaint.color = Color.WHITE
             textPaint.textSize = 24f
             canvas.drawText(
-                "Confidence: ${(gestureConfidence * 100).toInt()}%",
+                "Confidence: ${(result.confidence * 100).toInt()}%",
                 panelX + 20f,
                 textY,
                 textPaint
@@ -302,22 +249,18 @@ class GestureOverlayView @JvmOverloads constructor(
     /**
      * ⭐ PERFORMANCE DEBUG PANEL - NOW VISIBLE!
      *
-     * Shows:
-     * - MediaPipe inference time
-     * - ONNX inference time
-     * - Total pipeline time
-     * - Performance status
-     *
-     * FIX #2: Bright orange background (impossible to miss!)
-     * FIX #3: Positioned at Y=700px (clear space, no overlap)
+     * Shows MediaPipe and ONNX inference times
+     * Bright orange background at Y=700px (clear space)
      */
     private fun drawDebugPanel(canvas: Canvas) {
+        val result = gestureResult ?: return
+
         val panelX = 40f
-        val panelY = 700f  // ⭐ FIX #3: Moved to clear space below hand
+        val panelY = 700f  // Clear space below hand
         val panelWidth = width - 80f
         val panelHeight = 200f
 
-        // ⭐ FIX #2: BRIGHT ORANGE BACKGROUND (impossible to miss!)
+        // ⭐ BRIGHT ORANGE BACKGROUND (impossible to miss!)
         canvas.drawRoundRect(
             panelX, panelY,
             panelX + panelWidth,
@@ -339,7 +282,7 @@ class GestureOverlayView @JvmOverloads constructor(
 
         // MediaPipe time
         canvas.drawText(
-            "MediaPipe: %.1f ms".format(mediaPipeMs),
+            "MediaPipe: %.1f ms".format(result.mediaPipeTimeMs),
             panelX + 20f,
             textY,
             debugTextPaint
@@ -348,7 +291,7 @@ class GestureOverlayView @JvmOverloads constructor(
 
         // ONNX time
         canvas.drawText(
-            "ONNX: %.1f ms".format(onnxMs),
+            "ONNX: %.1f ms".format(result.onnxTimeMs),
             panelX + 20f,
             textY,
             debugTextPaint
@@ -356,7 +299,7 @@ class GestureOverlayView @JvmOverloads constructor(
         textY += 35f
 
         // Total time
-        val totalMs = mediaPipeMs + onnxMs
+        val totalMs = result.totalTimeMs
         canvas.drawText(
             "Total: %.1f ms".format(totalMs),
             panelX + 20f,
@@ -366,9 +309,9 @@ class GestureOverlayView @JvmOverloads constructor(
 
         // Performance status indicator
         val perfStatus = when {
-            totalMs < 50f -> "🟢 EXCELLENT"
-            totalMs < 100f -> "🟡 GOOD"
-            totalMs < 150f -> "🟠 FAIR"
+            totalMs < 50.0 -> "🟢 EXCELLENT"
+            totalMs < 100.0 -> "🟡 GOOD"
+            totalMs < 150.0 -> "🟠 FAIR"
             else -> "🔴 SLOW"
         }
 
