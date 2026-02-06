@@ -8,12 +8,13 @@ import android.util.AttributeSet
 import android.view.View
 
 /**
- * Custom overlay view with updateData() method and VISIBLE debug panel
+ * Complete Gesture Recognition Overlay with:
  *
- * FIXED:
- * - Added updateData() method that MainActivity calls
- * - Debug panel with bright orange background (impossible to miss!)
- * - Shows MediaPipe and ONNX inference times
+ * TOP: Performance Monitor (orange) - inference times, CPU, RAM, GPU, NPU, hand status, buffer
+ * MIDDLE LEFT: Gesture panel - current gesture + confidence
+ * RIGHT: Probability bars - all 11 gestures with visual bars
+ * CENTER: Hand skeleton - FIXED alignment with mirroring
+ * BOTTOM: FPS counter
  */
 class GestureOverlayView @JvmOverloads constructor(
     context: Context,
@@ -37,17 +38,20 @@ class GestureOverlayView @JvmOverloads constructor(
         )
     }
 
-    // State variables
+    // State
     private var gestureResult: GestureResult? = null
     private var landmarks: FloatArray? = null
     private var fps: Float = 0f
     private var frameCount: Int = 0
     private var bufferSize: Int = 0
     private var handDetected: Boolean = false
-    private var imageWidth: Int = 0
-    private var imageHeight: Int = 0
     private var rotation: Int = 0
     private var mirrorHorizontal: Boolean = false
+
+    // Performance monitoring
+    private val performanceMonitor = PerformanceMonitor()
+    private var gpuStatus: String = "MediaPipe"
+    private var npuStatus: String = "ONNX"
 
     // Paint objects
     private val landmarkPaint = Paint().apply {
@@ -65,7 +69,7 @@ class GestureOverlayView @JvmOverloads constructor(
 
     private val textPaint = Paint().apply {
         color = Color.WHITE
-        textSize = 28f
+        textSize = 24f
         isAntiAlias = true
     }
 
@@ -75,16 +79,23 @@ class GestureOverlayView @JvmOverloads constructor(
         isAntiAlias = true
     }
 
-    // ⭐ BRIGHT DEBUG PANEL BACKGROUND
-    private val debugBackgroundPaint = Paint().apply {
-        color = Color.argb(255, 255, 140, 0)  // Bright orange, fully opaque
+    // Performance monitor (orange)
+    private val perfBackgroundPaint = Paint().apply {
+        color = Color.argb(255, 255, 140, 0)
         style = Paint.Style.FILL
         isAntiAlias = true
     }
 
-    private val debugTextPaint = Paint().apply {
-        color = Color.BLACK  // Black text on orange background
-        textSize = 24f
+    private val perfTextPaint = Paint().apply {
+        color = Color.BLACK
+        textSize = 20f
+        isAntiAlias = true
+    }
+
+    // Probability bars
+    private val barPaint = Paint().apply {
+        color = Color.GREEN
+        style = Paint.Style.FILL
         isAntiAlias = true
     }
 
@@ -93,7 +104,7 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * ⭐ Main update method that MainActivity calls
+     * Main update method called from MainActivity
      */
     fun updateData(
         result: GestureResult?,
@@ -113,31 +124,35 @@ class GestureOverlayView @JvmOverloads constructor(
         this.frameCount = frameCount
         this.bufferSize = bufferSize
         this.handDetected = handDetected
-        this.imageWidth = imageWidth
-        this.imageHeight = imageHeight
         this.rotation = rotation
         this.mirrorHorizontal = mirrorHorizontal
         invalidate()
     }
 
     /**
-     * Main drawing method
+     * Set GPU/NPU accelerator status
      */
+    fun setAcceleratorStatus(gpu: String, npu: String) {
+        this.gpuStatus = gpu
+        this.npuStatus = npu
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
         try {
             drawHandSkeleton(canvas)
-            drawTopPanel(canvas)
-            drawBottomInfo(canvas)
-            drawDebugPanel(canvas)  // ⭐ Draw debug panel LAST (on top)
+            drawPerformanceMonitor(canvas)
+            drawGesturePanel(canvas)
+            drawProbabilityBars(canvas)
+            drawFPSCounter(canvas)
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Error drawing overlay", e)
+            android.util.Log.e(TAG, "Draw error", e)
         }
     }
 
     /**
-     * Draw hand skeleton
+     * Draw hand skeleton with fixed alignment
      */
     private fun drawHandSkeleton(canvas: Canvas) {
         val lm = landmarks ?: return
@@ -149,177 +164,229 @@ class GestureOverlayView @JvmOverloads constructor(
         // Draw connections
         for ((start, end) in HAND_CONNECTIONS) {
             if (start * 3 + 2 < lm.size && end * 3 + 2 < lm.size) {
-                val x1 = lm[start * 3] * w
-                val y1 = lm[start * 3 + 1] * h
-                val x2 = lm[end * 3] * w
-                val y2 = lm[end * 3 + 1] * h
-
+                val (x1, y1) = transformPoint(lm[start * 3], lm[start * 3 + 1], w, h)
+                val (x2, y2) = transformPoint(lm[end * 3], lm[end * 3 + 1], w, h)
                 canvas.drawLine(x1, y1, x2, y2, connectionPaint)
             }
         }
 
         // Draw landmarks
         for (i in 0 until 21) {
-            val x = lm[i * 3] * w
-            val y = lm[i * 3 + 1] * h
+            val (x, y) = transformPoint(lm[i * 3], lm[i * 3 + 1], w, h)
             canvas.drawCircle(x, y, LANDMARK_RADIUS, landmarkPaint)
         }
     }
 
     /**
-     * Draw top panel (hand status, gesture, buffer)
+     * Transform coordinates with mirroring
      */
-    private fun drawTopPanel(canvas: Canvas) {
-        val panelX = 40f
-        val panelY = 50f
-        val panelWidth = 350f
-        val panelHeight = 180f
+    private fun transformPoint(x: Float, y: Float, w: Float, h: Float): Pair<Float, Float> {
+        var tx = x
+
+        // Mirror horizontally for front camera
+        if (mirrorHorizontal) {
+            tx = 1.0f - tx
+        }
+
+        return Pair(tx * w, y * h)
+    }
+
+    /**
+     * Draw performance monitor at TOP
+     */
+    private fun drawPerformanceMonitor(canvas: Canvas) {
+        val result = gestureResult
+
+        val panelX = 15f
+        val panelY = 15f
+        val panelWidth = width - 30f
+        val panelHeight = 215f
+
+        // Orange background
+        canvas.drawRoundRect(
+            panelX, panelY,
+            panelX + panelWidth,
+            panelY + panelHeight,
+            12f, 12f,
+            perfBackgroundPaint
+        )
+
+        var textY = panelY + 28f
+        perfTextPaint.textSize = 22f
+        perfTextPaint.isFakeBoldText = true
+
+        // Title
+        canvas.drawText("⚡ PERFORMANCE MONITOR", panelX + 12f, textY, perfTextPaint)
+        textY += 38f
+
+        perfTextPaint.textSize = 19f
+        perfTextPaint.isFakeBoldText = false
+
+        // Inference times
+        if (result != null) {
+            canvas.drawText(
+                "MediaPipe: %.1fms | ONNX: %.1fms | Total: %.1fms".format(
+                    result.mediaPipeTimeMs,
+                    result.onnxTimeMs,
+                    result.totalTimeMs
+                ),
+                panelX + 12f,
+                textY,
+                perfTextPaint
+            )
+        } else {
+            canvas.drawText("MediaPipe: --ms | ONNX: --ms | Total: --ms", panelX + 12f, textY, perfTextPaint)
+        }
+        textY += 33f
+
+        // CPU & RAM
+        val cpuUsage = performanceMonitor.getCpuUsage()
+        val ramUsage = performanceMonitor.getMemoryUsageMB()
+        canvas.drawText(
+            "CPU: %.0f%% | RAM: %d MB".format(cpuUsage, ramUsage),
+            panelX + 12f,
+            textY,
+            perfTextPaint
+        )
+        textY += 33f
+
+        // GPU & NPU
+        canvas.drawText("GPU: $gpuStatus | NPU: $npuStatus", panelX + 12f, textY, perfTextPaint)
+        textY += 33f
+
+        // Hand detection & buffer
+        val handStatus = if (handDetected) "✓ HAND DETECTED" else "✗ NO HAND"
+
+        perfTextPaint.color = if (handDetected) Color.rgb(0, 160, 0) else Color.rgb(180, 0, 0)
+        canvas.drawText(handStatus, panelX + 12f, textY, perfTextPaint)
+
+        perfTextPaint.color = Color.BLACK
+        val bufferText = " | Buffer: $bufferSize/${Config.SEQUENCE_LENGTH}"
+        canvas.drawText(bufferText, panelX + 165f, textY, perfTextPaint)
+    }
+
+    /**
+     * Draw gesture panel (middle left)
+     */
+    private fun drawGesturePanel(canvas: Canvas) {
+        val result = gestureResult ?: return
+        if (!handDetected) return
+
+        val panelX = 15f
+        val panelY = 250f
+        val panelWidth = 270f
+        val panelHeight = 95f
 
         // Background
         canvas.drawRoundRect(
             panelX, panelY,
             panelX + panelWidth,
             panelY + panelHeight,
-            20f, 20f,
+            12f, 12f,
             backgroundPaint
         )
 
-        var textY = panelY + 40f
+        var textY = panelY + 32f
+        textPaint.textSize = 22f
 
-        // Hand detection status
-        val handStatus = if (handDetected) "✓ HAND DETECTED" else "✗ NO HAND"
-        val handColor = if (handDetected) Color.GREEN else Color.RED
-        textPaint.color = handColor
-        canvas.drawText(handStatus, panelX + 20f, textY, textPaint)
-        textY += 35f
+        // Gesture name
+        val color = if (result.confidence > Config.CONFIDENCE_THRESHOLD) Color.GREEN else Color.YELLOW
+        textPaint.color = color
+        canvas.drawText(
+            "GESTURE: ${result.gesture.replace('_', ' ').uppercase()}",
+            panelX + 12f,
+            textY,
+            textPaint
+        )
+        textY += 37f
 
-        // Buffer status
+        // Confidence
         textPaint.color = Color.WHITE
-        canvas.drawText("Buffer: $bufferSize/${Config.SEQUENCE_LENGTH}", panelX + 20f, textY, textPaint)
-        textY += 35f
-
-        // Current gesture
-        val result = gestureResult
-        if (result != null && handDetected) {
-            val gestureColor = if (result.confidence > Config.CONFIDENCE_THRESHOLD) {
-                Color.GREEN
-            } else {
-                Color.YELLOW
-            }
-            textPaint.color = gestureColor
-            canvas.drawText(
-                "GESTURE: ${result.gesture.replace('_', ' ').uppercase()}",
-                panelX + 20f,
-                textY,
-                textPaint
-            )
-            textY += 35f
-
-            // Confidence
-            textPaint.color = Color.WHITE
-            textPaint.textSize = 24f
-            canvas.drawText(
-                "Confidence: ${(result.confidence * 100).toInt()}%",
-                panelX + 20f,
-                textY,
-                textPaint
-            )
-            textPaint.textSize = 28f
-        }
+        textPaint.textSize = 20f
+        canvas.drawText(
+            "Confidence: ${(result.confidence * 100).toInt()}%",
+            panelX + 12f,
+            textY,
+            textPaint
+        )
     }
 
     /**
-     * Draw bottom info (FPS, frame count)
+     * Draw probability bars (right side)
      */
-    private fun drawBottomInfo(canvas: Canvas) {
-        val y = height - 100f
-
-        // FPS
-        textPaint.color = Color.YELLOW
-        textPaint.textSize = 32f
-        canvas.drawText("FPS: %.1f".format(fps), 40f, y, textPaint)
-
-        // Frame count
-        textPaint.textSize = 24f
-        canvas.drawText("Frame: $frameCount", 40f, y + 35f, textPaint)
-
-        textPaint.textSize = 28f
-    }
-
-    /**
-     * ⭐ PERFORMANCE DEBUG PANEL - NOW VISIBLE!
-     *
-     * Shows MediaPipe and ONNX inference times
-     * Bright orange background at Y=700px (clear space)
-     */
-    private fun drawDebugPanel(canvas: Canvas) {
+    private fun drawProbabilityBars(canvas: Canvas) {
         val result = gestureResult ?: return
 
-        val panelX = 40f
-        val panelY = 700f  // Clear space below hand
-        val panelWidth = width - 80f
-        val panelHeight = 200f
+        val panelX = width - 210f
+        val panelY = 250f
+        val panelWidth = 195f
+        val barMaxWidth = 110f
 
-        // ⭐ BRIGHT ORANGE BACKGROUND (impossible to miss!)
+        // Background
+        val panelHeight = 28f * Config.NUM_CLASSES + 45f
         canvas.drawRoundRect(
             panelX, panelY,
             panelX + panelWidth,
             panelY + panelHeight,
-            20f, 20f,
-            debugBackgroundPaint
+            12f, 12f,
+            backgroundPaint
         )
 
-        var textY = panelY + 35f
+        var textY = panelY + 28f
+        textPaint.textSize = 19f
+        textPaint.color = Color.WHITE
+        textPaint.isFakeBoldText = true
 
-        // Title
-        debugTextPaint.textSize = 28f
-        debugTextPaint.isFakeBoldText = true
-        canvas.drawText("⚡ PERFORMANCE MONITOR", panelX + 20f, textY, debugTextPaint)
-        textY += 45f
+        canvas.drawText("Probabilities", panelX + 8f, textY, textPaint)
+        textY += 32f
 
-        debugTextPaint.textSize = 24f
-        debugTextPaint.isFakeBoldText = false
+        textPaint.isFakeBoldText = false
+        textPaint.textSize = 17f
 
-        // MediaPipe time
-        canvas.drawText(
-            "MediaPipe: %.1f ms".format(result.mediaPipeTimeMs),
-            panelX + 20f,
-            textY,
-            debugTextPaint
-        )
-        textY += 35f
+        // Draw each gesture
+        for (i in 0 until Config.NUM_CLASSES) {
+            val gestureName = Config.LABEL_MAP[i] ?: "unknown"
+            val prob = if (i < result.allProbabilities.size) result.allProbabilities[i] else 0f
 
-        // ONNX time
-        canvas.drawText(
-            "ONNX: %.1f ms".format(result.onnxTimeMs),
-            panelX + 20f,
-            textY,
-            debugTextPaint
-        )
-        textY += 35f
+            val displayName = gestureName.replace('_', ' ').take(9)
+            val isCurrent = gestureName == result.gesture
 
-        // Total time
-        val totalMs = result.totalTimeMs
-        canvas.drawText(
-            "Total: %.1f ms".format(totalMs),
-            panelX + 20f,
-            textY,
-            debugTextPaint
-        )
+            // Name
+            textPaint.color = if (isCurrent) Color.GREEN else Color.WHITE
+            canvas.drawText(displayName, panelX + 8f, textY, textPaint)
 
-        // Performance status indicator
-        val perfStatus = when {
-            totalMs < 50.0 -> "🟢 EXCELLENT"
-            totalMs < 100.0 -> "🟡 GOOD"
-            totalMs < 150.0 -> "🟠 FAIR"
-            else -> "🔴 SLOW"
+            // Bar
+            val barWidth = (prob * barMaxWidth).coerceIn(0f, barMaxWidth)
+            barPaint.color = if (isCurrent) Color.GREEN else Color.argb(180, 80, 180, 80)
+            canvas.drawRect(
+                panelX + 8f,
+                textY + 4f,
+                panelX + 8f + barWidth,
+                textY + 13f,
+                barPaint
+            )
+
+            // Percentage
+            textPaint.color = Color.WHITE
+            textPaint.textSize = 15f
+            canvas.drawText("${(prob * 100).toInt()}%", panelX + 130f, textY, textPaint)
+            textPaint.textSize = 17f
+
+            textY += 28f
         }
+    }
 
-        canvas.drawText(
-            perfStatus,
-            panelX + panelWidth - 180f,
-            textY,
-            debugTextPaint
-        )
+    /**
+     * Draw FPS counter (bottom)
+     */
+    private fun drawFPSCounter(canvas: Canvas) {
+        val y = height - 75f
+
+        textPaint.color = Color.YELLOW
+        textPaint.textSize = 26f
+        canvas.drawText("FPS: %.1f".format(fps), 15f, y, textPaint)
+
+        textPaint.textSize = 20f
+        canvas.drawText("Frame: $frameCount", 15f, y + 32f, textPaint)
     }
 }
