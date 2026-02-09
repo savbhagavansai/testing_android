@@ -4,169 +4,155 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 
 /**
- * MediaPipe hand landmark processor with rotation and mirroring support
- * Handles coordinate transformation for different camera orientations
+ * MediaPipe Hand Landmarker with flexible accelerator configuration
+ *
+ * Supports: GPU, NNAPI, CPU delegates based on Config
  */
-class MediaPipeProcessor(context: Context) {
+class MediaPipeProcessor(private val context: Context) {
 
     private val TAG = "MediaPipeProcessor"
 
     private var handLandmarker: HandLandmarker? = null
+    private var actualDelegate: String = "UNKNOWN"
 
     init {
+        initialize()
+    }
+
+    /**
+     * Initialize MediaPipe with configured accelerator
+     */
+    private fun initialize() {
         try {
-            // Create HandLandmarker options with GPU acceleration
+            Log.d(TAG, "Initializing MediaPipe with ${Config.MEDIAPIPE_ACCELERATOR} accelerator...")
+
+            // Determine delegate based on config
+            val delegate = when (Config.MEDIAPIPE_ACCELERATOR.uppercase()) {
+                "GPU" -> {
+                    actualDelegate = "GPU"
+                    Delegate.GPU
+                }
+                "NNAPI" -> {
+                    actualDelegate = "NNAPI"
+                    Delegate.NNAPI
+                }
+                "CPU" -> {
+                    actualDelegate = "CPU"
+                    Delegate.CPU
+                }
+                else -> {
+                    Log.w(TAG, "Unknown accelerator ${Config.MEDIAPIPE_ACCELERATOR}, defaulting to NNAPI")
+                    actualDelegate = "NNAPI"
+                    Delegate.NNAPI
+                }
+            }
+
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath("hand_landmarker.task")
-                .setDelegate(Delegate.GPU)  // ✓ GPU acceleration enabled!
+                .setDelegate(delegate)
                 .build()
 
             val options = HandLandmarker.HandLandmarkerOptions.builder()
                 .setBaseOptions(baseOptions)
-                .setMinHandDetectionConfidence(Config.MP_HANDS_CONFIDENCE)
-                .setMinTrackingConfidence(Config.MP_HANDS_TRACKING_CONFIDENCE)
-                .setNumHands(2)  // Detect up to 2 hands
+                .setRunningMode(RunningMode.IMAGE)
+                .setNumHands(1)
+                .setMinHandDetectionConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                .setMinHandPresenceConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                .setMinTrackingConfidence(Config.MIN_DETECTION_CONFIDENCE)
                 .build()
 
-            // Create HandLandmarker
             handLandmarker = HandLandmarker.createFromOptions(context, options)
 
-            Log.d(TAG, "✓ MediaPipe initialized with GPU acceleration")
+            Log.d(TAG, "✓ MediaPipe initialized successfully with $actualDelegate delegate")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize MediaPipe", e)
-            throw RuntimeException("Failed to initialize MediaPipe: ${e.message}", e)
+            Log.e(TAG, "Error initializing MediaPipe", e)
+
+            // Try fallback to CPU if configured delegate fails
+            if (Config.MEDIAPIPE_ACCELERATOR.uppercase() != "CPU") {
+                Log.w(TAG, "Attempting CPU fallback...")
+                try {
+                    val baseOptions = BaseOptions.builder()
+                        .setModelAssetPath("hand_landmarker.task")
+                        .setDelegate(Delegate.CPU)
+                        .build()
+
+                    val options = HandLandmarker.HandLandmarkerOptions.builder()
+                        .setBaseOptions(baseOptions)
+                        .setRunningMode(RunningMode.IMAGE)
+                        .setNumHands(1)
+                        .setMinHandDetectionConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                        .setMinHandPresenceConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                        .setMinTrackingConfidence(Config.MIN_DETECTION_CONFIDENCE)
+                        .build()
+
+                    handLandmarker = HandLandmarker.createFromOptions(context, options)
+                    actualDelegate = "CPU (fallback)"
+
+                    Log.d(TAG, "✓ MediaPipe initialized with CPU fallback")
+                } catch (fallbackError: Exception) {
+                    Log.e(TAG, "CPU fallback also failed", fallbackError)
+                    throw fallbackError
+                }
+            } else {
+                throw e
+            }
         }
     }
 
     /**
-     * Extract hand landmarks from bitmap (RAW - no transformation)
-     * Landmarks are returned in MediaPipe's original coordinate system
-     * for model input (matching training data)
-     *
-     * @param bitmap Input image
-     * @return FloatArray of 63 values (21 landmarks × 3 coords) or null if no hand detected
+     * Extract landmarks from bitmap
+     * Returns normalized coordinates (0.0 to 1.0) or null if no hand detected
      */
     fun extractLandmarks(bitmap: Bitmap): FloatArray? {
-        val landmarker = handLandmarker ?: run {
-            Log.e(TAG, "HandLandmarker not initialized")
-            return null
-        }
-
-        try {
-            // Convert bitmap to MediaPipe image
-            val mpImage = BitmapImageBuilder(bitmap).build()
-
-            // Detect hands
-            val result: HandLandmarkerResult = landmarker.detect(mpImage)
-
-            // Check if hand detected
-            if (result.landmarks().isEmpty()) {
-                return null
-            }
-
-            // Get first hand landmarks
-            val handLandmarks = result.landmarks()[0]
-
-            if (handLandmarks.size != 21) {
-                Log.w(TAG, "Expected 21 landmarks, got ${handLandmarks.size}")
-                return null
-            }
-
-            // Extract x, y, z coordinates (RAW - no transformation)
-            val landmarks = FloatArray(63)
-            var idx = 0
-
-            for (landmark in handLandmarks) {
-                // Store raw MediaPipe coordinates
-                landmarks[idx++] = landmark.x()
-                landmarks[idx++] = landmark.y()
-                landmarks[idx++] = landmark.z()
-            }
-
-            return landmarks
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Landmark extraction failed", e)
-            return null
-        }
-    }
-
-    /**
-     * Extract landmarks with additional metadata
-     *
-     * @param bitmap Input image
-     * @return Triple of (landmarks, handedness, confidence) or null
-     */
-    fun extractLandmarksWithMetadata(bitmap: Bitmap): Triple<FloatArray, String, Float>? {
-        val landmarker = handLandmarker ?: return null
-
         try {
             val mpImage = BitmapImageBuilder(bitmap).build()
-            val result = landmarker.detect(mpImage)
+            val result = handLandmarker?.detect(mpImage)
 
-            if (result.landmarks().isEmpty()) {
-                return null
+            if (result?.landmarks()?.isNotEmpty() == true) {
+                val landmarks = result.landmarks()[0]
+                val landmarkArray = FloatArray(63)
+
+                for (i in 0 until 21) {
+                    landmarkArray[i * 3] = landmarks[i].x()
+                    landmarkArray[i * 3 + 1] = landmarks[i].y()
+                    landmarkArray[i * 3 + 2] = landmarks[i].z()
+                }
+
+                return landmarkArray
             }
 
-            // Extract raw landmarks
-            val handLandmarks = result.landmarks()[0]
-            val landmarks = FloatArray(63)
-            var idx = 0
-
-            for (landmark in handLandmarks) {
-                landmarks[idx++] = landmark.x()
-                landmarks[idx++] = landmark.y()
-                landmarks[idx++] = landmark.z()
-            }
-
-            // Get handedness (Left/Right)
-            val handedness = if (result.handednesses().isNotEmpty()) {
-                result.handednesses()[0][0].categoryName()
-            } else {
-                "Unknown"
-            }
-
-            // Get confidence
-            val confidence = if (result.handednesses().isNotEmpty()) {
-                result.handednesses()[0][0].score()
-            } else {
-                0f
-            }
-
-            return Triple(landmarks, handedness, confidence)
+            return null
 
         } catch (e: Exception) {
-            Log.e(TAG, "Landmark extraction with metadata failed", e)
+            Log.e(TAG, "Error extracting landmarks", e)
             return null
         }
     }
 
     /**
-     * Check if hand is detected in image
-     *
-     * @param bitmap Input image
-     * @return True if hand detected
+     * Get the actual delegate being used
      */
-    fun isHandDetected(bitmap: Bitmap): Boolean {
-        return extractLandmarks(bitmap) != null
+    fun getActualDelegate(): String {
+        return actualDelegate
     }
 
     /**
-     * Release resources
+     * Close resources
      */
     fun close() {
         try {
             handLandmarker?.close()
-            Log.d(TAG, "MediaPipe resources released")
+            Log.d(TAG, "MediaPipeProcessor closed")
         } catch (e: Exception) {
-            Log.e(TAG, "Error releasing MediaPipe resources", e)
+            Log.e(TAG, "Error closing MediaPipeProcessor", e)
         }
     }
 }

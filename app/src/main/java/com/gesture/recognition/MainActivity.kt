@@ -73,6 +73,17 @@ class MainActivity : AppCompatActivity() {
         // Initialize gesture recognizer
         try {
             gestureRecognizer = GestureRecognizer(this)
+            try {
+                // Get actual accelerators from the recognizer's components
+                val mediapipeAccel = gestureRecognizer?.getMediaPipeAccelerator() ?: "UNKNOWN"
+                val onnxAccel = gestureRecognizer?.getOnnxAccelerator() ?: "UNKNOWN"
+                // Set in overlay view
+                overlayView.setAcceleratorStatus(mediapipeAccel, onnxAccel)
+
+                Log.d(TAG, "Accelerators: MediaPipe=$mediapipeAccel, ONNX=$onnxAccel")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error getting accelerator status", e)
+            }
             Log.d(TAG, "GestureRecognizer initialized")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize GestureRecognizer", e)

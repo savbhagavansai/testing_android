@@ -9,12 +9,11 @@ import android.view.View
 
 /**
  * Complete Gesture Recognition Overlay with:
- *
- * TOP: Performance Monitor (orange) - inference times, CPU, RAM, GPU, NPU, hand status, buffer
- * MIDDLE LEFT: Gesture panel - current gesture + confidence
- * RIGHT: Probability bars - all 11 gestures with visual bars
- * CENTER: Hand skeleton - FIXED alignment with mirroring
- * BOTTOM: FPS counter
+ * - Performance monitor (TOP) with actual accelerator info
+ * - Gesture panel (MIDDLE LEFT)
+ * - Probability bars (RIGHT)
+ * - Hand skeleton with FIXED 90° rotation
+ * - FPS counter (BOTTOM)
  */
 class GestureOverlayView @JvmOverloads constructor(
     context: Context,
@@ -27,7 +26,6 @@ class GestureOverlayView @JvmOverloads constructor(
         private const val LANDMARK_RADIUS = 8f
         private const val CONNECTION_THICKNESS = 4f
 
-        // MediaPipe hand connections
         private val HAND_CONNECTIONS = listOf(
             0 to 1, 1 to 2, 2 to 3, 3 to 4,
             0 to 5, 5 to 6, 6 to 7, 7 to 8,
@@ -50,8 +48,10 @@ class GestureOverlayView @JvmOverloads constructor(
 
     // Performance monitoring
     private val performanceMonitor = PerformanceMonitor()
-    private var gpuStatus: String = "MediaPipe"
-    private var npuStatus: String = "ONNX"
+
+    // Actual accelerators being used (set from GestureRecognizer)
+    private var mediapipeAccelerator: String = "UNKNOWN"
+    private var onnxAccelerator: String = "UNKNOWN"
 
     // Paint objects
     private val landmarkPaint = Paint().apply {
@@ -79,7 +79,6 @@ class GestureOverlayView @JvmOverloads constructor(
         isAntiAlias = true
     }
 
-    // Performance monitor (orange)
     private val perfBackgroundPaint = Paint().apply {
         color = Color.argb(255, 255, 140, 0)
         style = Paint.Style.FILL
@@ -92,7 +91,6 @@ class GestureOverlayView @JvmOverloads constructor(
         isAntiAlias = true
     }
 
-    // Probability bars
     private val barPaint = Paint().apply {
         color = Color.GREEN
         style = Paint.Style.FILL
@@ -103,9 +101,6 @@ class GestureOverlayView @JvmOverloads constructor(
         setWillNotDraw(false)
     }
 
-    /**
-     * Main update method called from MainActivity
-     */
     fun updateData(
         result: GestureResult?,
         landmarks: FloatArray?,
@@ -130,11 +125,11 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Set GPU/NPU accelerator status
+     * Set actual accelerators being used (called from MainActivity)
      */
-    fun setAcceleratorStatus(gpu: String, npu: String) {
-        this.gpuStatus = gpu
-        this.npuStatus = npu
+    fun setAcceleratorStatus(mediapipe: String, onnx: String) {
+        this.mediapipeAccelerator = mediapipe
+        this.onnxAccelerator = onnx
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -152,7 +147,7 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Draw hand skeleton with fixed alignment
+     * Draw hand skeleton with FIXED 90° counter-clockwise rotation
      */
     private fun drawHandSkeleton(canvas: Canvas) {
         val lm = landmarks ?: return
@@ -178,17 +173,29 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Transform coordinates with mirroring
+     * Transform coordinates with 90° rotation and mirroring
+     *
+     * Fixes: Landmarks rotated 90° clockwise
+     * Solution: Rotate 90° counter-clockwise (right → bottom)
      */
     private fun transformPoint(x: Float, y: Float, w: Float, h: Float): Pair<Float, Float> {
         var tx = x
+        var ty = y
 
-        // Mirror horizontally for front camera
-        if (mirrorHorizontal) {
-            tx = 1.0f - tx
+        // Step 1: Apply 90° counter-clockwise rotation
+        // Old (x, y) → New (y, 1-x)
+        val rotatedX = ty
+        val rotatedY = 1.0f - tx
+
+        // Step 2: Apply mirroring for front camera
+        val finalX = if (mirrorHorizontal) {
+            1.0f - rotatedX
+        } else {
+            rotatedX
         }
 
-        return Pair(tx * w, y * h)
+        // Step 3: Scale to view dimensions
+        return Pair(finalX * w, rotatedY * h)
     }
 
     /**
@@ -202,7 +209,6 @@ class GestureOverlayView @JvmOverloads constructor(
         val panelWidth = width - 30f
         val panelHeight = 215f
 
-        // Orange background
         canvas.drawRoundRect(
             panelX, panelY,
             panelX + panelWidth,
@@ -215,7 +221,6 @@ class GestureOverlayView @JvmOverloads constructor(
         perfTextPaint.textSize = 22f
         perfTextPaint.isFakeBoldText = true
 
-        // Title
         canvas.drawText("⚡ PERFORMANCE MONITOR", panelX + 12f, textY, perfTextPaint)
         textY += 38f
 
@@ -250,8 +255,13 @@ class GestureOverlayView @JvmOverloads constructor(
         )
         textY += 33f
 
-        // GPU & NPU
-        canvas.drawText("GPU: $gpuStatus | NPU: $npuStatus", panelX + 12f, textY, perfTextPaint)
+        // Actual accelerators being used
+        canvas.drawText(
+            "MediaPipe: $mediapipeAccelerator | ONNX: $onnxAccelerator",
+            panelX + 12f,
+            textY,
+            perfTextPaint
+        )
         textY += 33f
 
         // Hand detection & buffer
@@ -277,7 +287,6 @@ class GestureOverlayView @JvmOverloads constructor(
         val panelWidth = 270f
         val panelHeight = 95f
 
-        // Background
         canvas.drawRoundRect(
             panelX, panelY,
             panelX + panelWidth,
@@ -289,7 +298,6 @@ class GestureOverlayView @JvmOverloads constructor(
         var textY = panelY + 32f
         textPaint.textSize = 22f
 
-        // Gesture name
         val color = if (result.confidence > Config.CONFIDENCE_THRESHOLD) Color.GREEN else Color.YELLOW
         textPaint.color = color
         canvas.drawText(
@@ -300,7 +308,6 @@ class GestureOverlayView @JvmOverloads constructor(
         )
         textY += 37f
 
-        // Confidence
         textPaint.color = Color.WHITE
         textPaint.textSize = 20f
         canvas.drawText(
@@ -322,7 +329,6 @@ class GestureOverlayView @JvmOverloads constructor(
         val panelWidth = 195f
         val barMaxWidth = 110f
 
-        // Background
         val panelHeight = 28f * Config.NUM_CLASSES + 45f
         canvas.drawRoundRect(
             panelX, panelY,
@@ -343,7 +349,6 @@ class GestureOverlayView @JvmOverloads constructor(
         textPaint.isFakeBoldText = false
         textPaint.textSize = 17f
 
-        // Draw each gesture
         for (i in 0 until Config.NUM_CLASSES) {
             val gestureName = Config.IDX_TO_LABEL[i] ?: "unknown"
             val prob = if (i < result.allProbabilities.size) result.allProbabilities[i] else 0f
@@ -351,11 +356,9 @@ class GestureOverlayView @JvmOverloads constructor(
             val displayName = gestureName.replace('_', ' ').take(9)
             val isCurrent = gestureName == result.gesture
 
-            // Name
             textPaint.color = if (isCurrent) Color.GREEN else Color.WHITE
             canvas.drawText(displayName, panelX + 8f, textY, textPaint)
 
-            // Bar
             val barWidth = (prob * barMaxWidth).coerceIn(0f, barMaxWidth)
             barPaint.color = if (isCurrent) Color.GREEN else Color.argb(180, 80, 180, 80)
             canvas.drawRect(
@@ -366,7 +369,6 @@ class GestureOverlayView @JvmOverloads constructor(
                 barPaint
             )
 
-            // Percentage
             textPaint.color = Color.WHITE
             textPaint.textSize = 15f
             canvas.drawText("${(prob * 100).toInt()}%", panelX + 130f, textY, textPaint)

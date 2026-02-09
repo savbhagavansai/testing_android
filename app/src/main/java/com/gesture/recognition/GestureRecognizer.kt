@@ -13,8 +13,8 @@ class GestureRecognizer(context: Context) {
     private val TAG = "GestureRecognizer"
 
     // Core components
-    private val mediaPipeProcessor: MediaPipeProcessor
-    private val onnxInference: ONNXInference
+    internal val mediaPipeProcessor: MediaPipeProcessor
+    internal val onnxInference: ONNXInference
     private val sequenceBuffer: SequenceBuffer
     private val predictionSmoother: PredictionSmoother
 
@@ -258,5 +258,16 @@ class GestureRecognizer(context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing resources", e)
         }
+    }
+    /**
+     * Add these methods to GestureRecognizer class:
+     */
+
+    fun getMediaPipeAccelerator(): String {
+        return mediaPipeProcessor.getActualDelegate()
+    }
+
+    fun getOnnxAccelerator(): String {
+        return onnxInference.getActualAccelerator()
     }
 }
