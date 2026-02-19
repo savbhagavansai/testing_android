@@ -13,7 +13,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 /**
  * MediaPipe Hand Landmarker with flexible accelerator configuration
  *
- * Supports: GPU, NNAPI, CPU delegates based on Config
+ * Supports: GPU, CPU delegates (MediaPipe doesn't support NNAPI)
  */
 class MediaPipeProcessor(private val context: Context) {
 
@@ -34,23 +34,21 @@ class MediaPipeProcessor(private val context: Context) {
             Log.d(TAG, "Initializing MediaPipe with ${Config.MEDIAPIPE_ACCELERATOR} accelerator...")
 
             // Determine delegate based on config
+            // Note: MediaPipe only supports GPU and CPU (no NNAPI delegate available)
             val delegate = when (Config.MEDIAPIPE_ACCELERATOR.uppercase()) {
                 "GPU" -> {
                     actualDelegate = "GPU"
                     Delegate.GPU
-                }
-                "NNAPI" -> {
-                    actualDelegate = "NNAPI"
-                    Delegate.NNAPI
                 }
                 "CPU" -> {
                     actualDelegate = "CPU"
                     Delegate.CPU
                 }
                 else -> {
-                    Log.w(TAG, "Unknown accelerator ${Config.MEDIAPIPE_ACCELERATOR}, defaulting to NNAPI")
-                    actualDelegate = "NNAPI"
-                    Delegate.NNAPI
+                    // Default to GPU for any other value (including "NNAPI")
+                    Log.w(TAG, "MediaPipe doesn't support ${Config.MEDIAPIPE_ACCELERATOR}, using GPU instead")
+                    actualDelegate = "GPU"
+                    Delegate.GPU
                 }
             }
 
@@ -75,7 +73,7 @@ class MediaPipeProcessor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing MediaPipe", e)
 
-            // Try fallback to CPU if configured delegate fails
+            // Try fallback to CPU if GPU fails
             if (Config.MEDIAPIPE_ACCELERATOR.uppercase() != "CPU") {
                 Log.w(TAG, "Attempting CPU fallback...")
                 try {
