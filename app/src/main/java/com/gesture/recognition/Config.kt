@@ -32,7 +32,7 @@ object Config {
      * - "GPU"   : Force GPU delegate
      * - "CPU"   : Force CPU only (slowest)
      */
-    const val MEDIAPIPE_ACCELERATOR = "NNAPI"
+    const val MEDIAPIPE_ACCELERATOR = "GPU"
 
     /**
      * ONNX Accelerator Options:
