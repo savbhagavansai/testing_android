@@ -4,16 +4,16 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
+import androidx.camera.core.CameraSelector
 
 /**
- * Complete Gesture Recognition Overlay with:
- * - Performance monitor (TOP) with actual accelerator info
- * - Gesture panel (MIDDLE LEFT)
- * - Probability bars (RIGHT)
- * - Hand skeleton with FIXED 90° rotation
- * - FPS counter (BOTTOM)
+ * Fixed Gesture Overlay View with:
+ * - Automatic preview bounds calculation (fixes vertical stretch)
+ * - Camera-specific rotation (fixes back camera 180° issue)
+ * - Proper probability display (already fixed in ONNXInference)
  */
 class GestureOverlayView @JvmOverloads constructor(
     context: Context,
@@ -43,13 +43,18 @@ class GestureOverlayView @JvmOverloads constructor(
     private var frameCount: Int = 0
     private var bufferSize: Int = 0
     private var handDetected: Boolean = false
+    private var imageWidth: Int = 0
+    private var imageHeight: Int = 0
     private var rotation: Int = 0
     private var mirrorHorizontal: Boolean = false
+    private var cameraFacing: Int = CameraSelector.LENS_FACING_BACK
+
+    // Preview bounds (calculated automatically)
+    private var previewBounds = RectF()
 
     // Performance monitoring
     private val performanceMonitor = PerformanceMonitor()
 
-    // Actual accelerators being used (set from GestureRecognizer)
     private var mediapipeAccelerator: String = "UNKNOWN"
     private var onnxAccelerator: String = "UNKNOWN"
 
@@ -119,17 +124,61 @@ class GestureOverlayView @JvmOverloads constructor(
         this.frameCount = frameCount
         this.bufferSize = bufferSize
         this.handDetected = handDetected
+        this.imageWidth = imageWidth
+        this.imageHeight = imageHeight
         this.rotation = rotation
         this.mirrorHorizontal = mirrorHorizontal
+
+        // Calculate preview bounds when dimensions change
+        if (imageWidth > 0 && imageHeight > 0) {
+            calculatePreviewBounds()
+        }
+
         invalidate()
     }
 
     /**
-     * Set actual accelerators being used (called from MainActivity)
+     * Set camera facing to apply correct rotation
      */
+    fun setCameraFacing(facing: Int) {
+        this.cameraFacing = facing
+    }
+
     fun setAcceleratorStatus(mediapipe: String, onnx: String) {
         this.mediapipeAccelerator = mediapipe
         this.onnxAccelerator = onnx
+    }
+
+    /**
+     * Calculate preview bounds based on camera aspect ratio and FIT_CENTER scaling
+     *
+     * FIT_CENTER means:
+     * - Camera preview is scaled to fit width or height (whichever fits)
+     * - Maintains aspect ratio
+     * - Centered in the view
+     * - May have letterboxing (black bars)
+     */
+    private fun calculatePreviewBounds() {
+        if (imageWidth == 0 || imageHeight == 0 || width == 0 || height == 0) {
+            return
+        }
+
+        val viewWidth = width.toFloat()
+        val viewHeight = height.toFloat()
+        val imageAspect = imageWidth.toFloat() / imageHeight.toFloat()
+        val viewAspect = viewWidth / viewHeight
+
+        if (imageAspect > viewAspect) {
+            // Image is wider - fit to width, letterbox top/bottom
+            val scaledHeight = viewWidth / imageAspect
+            val offsetY = (viewHeight - scaledHeight) / 2f
+            previewBounds.set(0f, offsetY, viewWidth, offsetY + scaledHeight)
+        } else {
+            // Image is taller - fit to height, letterbox left/right
+            val scaledWidth = viewHeight * imageAspect
+            val offsetX = (viewWidth - scaledWidth) / 2f
+            previewBounds.set(offsetX, 0f, offsetX + scaledWidth, viewHeight)
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -147,60 +196,70 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Draw hand skeleton with FIXED 90° counter-clockwise rotation
+     * Draw hand skeleton with correct bounds and rotation
      */
     private fun drawHandSkeleton(canvas: Canvas) {
         val lm = landmarks ?: return
         if (lm.size != 63) return
-
-        val w = width.toFloat()
-        val h = height.toFloat()
+        if (previewBounds.isEmpty) return
 
         // Draw connections
         for ((start, end) in HAND_CONNECTIONS) {
             if (start * 3 + 2 < lm.size && end * 3 + 2 < lm.size) {
-                val (x1, y1) = transformPoint(lm[start * 3], lm[start * 3 + 1], w, h)
-                val (x2, y2) = transformPoint(lm[end * 3], lm[end * 3 + 1], w, h)
+                val (x1, y1) = transformPoint(lm[start * 3], lm[start * 3 + 1])
+                val (x2, y2) = transformPoint(lm[end * 3], lm[end * 3 + 1])
                 canvas.drawLine(x1, y1, x2, y2, connectionPaint)
             }
         }
 
         // Draw landmarks
         for (i in 0 until 21) {
-            val (x, y) = transformPoint(lm[i * 3], lm[i * 3 + 1], w, h)
+            val (x, y) = transformPoint(lm[i * 3], lm[i * 3 + 1])
             canvas.drawCircle(x, y, LANDMARK_RADIUS, landmarkPaint)
         }
     }
 
     /**
-     * Transform coordinates with 90° rotation and mirroring
+     * Transform MediaPipe coordinates to screen coordinates
      *
-     * Fixes: Landmarks rotated 90° clockwise
-     * Solution: Rotate 90° counter-clockwise (right → bottom)
+     * FIXES:
+     * 1. Scales to preview bounds (not full screen) - fixes vertical stretch
+     * 2. Applies camera-specific rotation - fixes back camera 180° issue
+     * 3. Applies mirroring for front camera
      */
-    private fun transformPoint(x: Float, y: Float, w: Float, h: Float): Pair<Float, Float> {
+    private fun transformPoint(x: Float, y: Float): Pair<Float, Float> {
         var tx = x
         var ty = y
 
-        // Step 1: Apply 90° counter-clockwise rotation
-        // Old (x, y) → New (y, 1-x)
-        val rotatedX = ty
-        val rotatedY = 1.0f - tx
+        // Step 1: Apply rotation based on camera facing
+        val isFrontCamera = (cameraFacing == CameraSelector.LENS_FACING_FRONT)
 
-        // Step 2: Apply mirroring for front camera
-        val finalX = if (mirrorHorizontal) {
-            1.0f - rotatedX
+        if (isFrontCamera) {
+            // Front camera: 90° counter-clockwise
+            val rotatedX = ty
+            val rotatedY = 1.0f - tx
+            tx = rotatedX
+            ty = rotatedY
         } else {
-            rotatedX
+            // Back camera: 90° clockwise (opposite of front)
+            val rotatedX = 1.0f - ty
+            val rotatedY = tx
+            tx = rotatedX
+            ty = rotatedY
         }
 
-        // Step 3: Scale to view dimensions
-        return Pair(finalX * w, rotatedY * h)
+        // Step 2: Apply mirroring for front camera
+        if (mirrorHorizontal) {
+            tx = 1.0f - tx
+        }
+
+        // Step 3: Scale to preview bounds (NOT full screen!)
+        val finalX = previewBounds.left + (tx * previewBounds.width())
+        val finalY = previewBounds.top + (ty * previewBounds.height())
+
+        return Pair(finalX, finalY)
     }
 
-    /**
-     * Draw performance monitor at TOP
-     */
     private fun drawPerformanceMonitor(canvas: Canvas) {
         val result = gestureResult
 
@@ -227,7 +286,6 @@ class GestureOverlayView @JvmOverloads constructor(
         perfTextPaint.textSize = 19f
         perfTextPaint.isFakeBoldText = false
 
-        // Inference times
         if (result != null) {
             canvas.drawText(
                 "MediaPipe: %.1fms | ONNX: %.1fms | Total: %.1fms".format(
@@ -244,7 +302,6 @@ class GestureOverlayView @JvmOverloads constructor(
         }
         textY += 33f
 
-        // CPU & RAM
         val cpuUsage = performanceMonitor.getCpuUsage()
         val ramUsage = performanceMonitor.getMemoryUsageMB()
         canvas.drawText(
@@ -255,7 +312,6 @@ class GestureOverlayView @JvmOverloads constructor(
         )
         textY += 33f
 
-        // Actual accelerators being used
         canvas.drawText(
             "MediaPipe: $mediapipeAccelerator | ONNX: $onnxAccelerator",
             panelX + 12f,
@@ -264,7 +320,6 @@ class GestureOverlayView @JvmOverloads constructor(
         )
         textY += 33f
 
-        // Hand detection & buffer
         val handStatus = if (handDetected) "✓ HAND DETECTED" else "✗ NO HAND"
 
         perfTextPaint.color = if (handDetected) Color.rgb(0, 160, 0) else Color.rgb(180, 0, 0)
@@ -275,9 +330,6 @@ class GestureOverlayView @JvmOverloads constructor(
         canvas.drawText(bufferText, panelX + 165f, textY, perfTextPaint)
     }
 
-    /**
-     * Draw gesture panel (middle left)
-     */
     private fun drawGesturePanel(canvas: Canvas) {
         val result = gestureResult ?: return
         if (!handDetected) return
@@ -319,7 +371,8 @@ class GestureOverlayView @JvmOverloads constructor(
     }
 
     /**
-     * Draw probability bars (right side)
+     * Draw probability bars - now with correct percentages (0-100%)
+     * Thanks to softmax in ONNXInference
      */
     private fun drawProbabilityBars(canvas: Canvas) {
         val result = gestureResult ?: return
@@ -371,6 +424,7 @@ class GestureOverlayView @JvmOverloads constructor(
 
             textPaint.color = Color.WHITE
             textPaint.textSize = 15f
+            // Probabilities are now 0-1, multiply by 100 for percentage
             canvas.drawText("${(prob * 100).toInt()}%", panelX + 130f, textY, textPaint)
             textPaint.textSize = 17f
 
@@ -378,9 +432,6 @@ class GestureOverlayView @JvmOverloads constructor(
         }
     }
 
-    /**
-     * Draw FPS counter (bottom)
-     */
     private fun drawFPSCounter(canvas: Canvas) {
         val y = height - 75f
 

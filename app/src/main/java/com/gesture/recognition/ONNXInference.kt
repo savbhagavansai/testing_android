@@ -3,11 +3,14 @@ package com.gesture.recognition
 import android.content.Context
 import android.util.Log
 import ai.onnxruntime.*
+import kotlin.math.exp
 
 /**
- * ONNX Runtime Inference with flexible accelerator configuration
+ * ONNX Runtime Inference with softmax correction
  *
- * Supports: NNAPI (NPU/GPU), XNNPACK (CPU optimized), CPU
+ * FIXES:
+ * - Added softmax function to convert raw logits to probabilities
+ * - This fixes negative percentages and values > 100%
  */
 class ONNXInference(private val context: Context) {
 
@@ -111,7 +114,35 @@ class ONNXInference(private val context: Context) {
     }
 
     /**
+     * Softmax function to convert raw logits to probabilities
+     *
+     * Raw logits can be any value: [-∞ to +∞]
+     * Softmax converts to probabilities: [0 to 1] that sum to 1.0
+     *
+     * This fixes the negative percentages and values > 100%
+     */
+    private fun softmax(logits: FloatArray): FloatArray {
+        // Find max for numerical stability
+        val maxLogit = logits.maxOrNull() ?: 0f
+
+        // Compute exp(logit - max) for each logit
+        val exps = FloatArray(logits.size) { i ->
+            exp((logits[i] - maxLogit).toDouble()).toFloat()
+        }
+
+        // Sum of all exponentials
+        val sumExps = exps.sum()
+
+        // Normalize to get probabilities
+        return FloatArray(logits.size) { i ->
+            exps[i] / sumExps
+        }
+    }
+
+    /**
      * Run inference and return (predicted_index, probabilities)
+     *
+     * IMPORTANT: Now applies softmax to convert logits to probabilities
      */
     fun predict(sequence: Array<FloatArray>): Pair<Int, FloatArray>? {
         return try {
@@ -127,8 +158,14 @@ class ONNXInference(private val context: Context) {
             outputs?.close()
 
             if (outputTensor != null && outputTensor.isNotEmpty()) {
-                val probabilities = outputTensor[0]
+                val rawLogits = outputTensor[0]
+
+                // Apply softmax to convert logits to probabilities
+                val probabilities = softmax(rawLogits)
+
+                // Find predicted class
                 val predictedIdx = probabilities.indices.maxByOrNull { probabilities[it] } ?: 0
+
                 Pair(predictedIdx, probabilities)
             } else {
                 null

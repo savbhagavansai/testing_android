@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.*
 import android.os.Bundle
 import android.util.Log
+import android.util.Size
 import android.view.MotionEvent
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +35,9 @@ class MainActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraExecutor: ExecutorService? = null
     private var useFrontCamera = true  // Start with front camera for tablets
+
+    // ← ADDED: Track camera facing for proper rotation
+    private var currentCameraFacing = CameraSelector.LENS_FACING_FRONT  // Match useFrontCamera
 
     // Gesture Recognition
     private var gestureRecognizer: GestureRecognizer? = null
@@ -73,6 +77,10 @@ class MainActivity : AppCompatActivity() {
         // Initialize gesture recognizer
         try {
             gestureRecognizer = GestureRecognizer(this)
+
+            // ← ADDED: Set initial camera facing in overlay
+            overlayView.setCameraFacing(currentCameraFacing)
+
             try {
                 // Get actual accelerators from the recognizer's components
                 val mediapipeAccel = gestureRecognizer?.getMediaPipeAccelerator() ?: "UNKNOWN"
@@ -134,7 +142,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchCamera() {
+        // Toggle front/back camera
         useFrontCamera = !useFrontCamera
+
+        // ← ADDED: Update camera facing tracker
+        currentCameraFacing = if (useFrontCamera) {
+            CameraSelector.LENS_FACING_FRONT
+        } else {
+            CameraSelector.LENS_FACING_BACK
+        }
+
         cameraProvider?.unbindAll()
         startCamera()
         Toast.makeText(
@@ -163,9 +180,13 @@ class MainActivity : AppCompatActivity() {
 
         provider.unbindAll()
 
-        // Preview - lower resolution for edge devices
+        // ← CHANGED: Increased resolution to 640x480 (from 240x180)
+        // This is optimal for MediaPipe - fast enough but good quality
+        val targetResolution = Size(640, 480)
+
+        // Preview
         val preview = Preview.Builder()
-            .setTargetResolution(android.util.Size(240, 180))  // Reduced for performance
+            .setTargetResolution(targetResolution)
             .build()
             .also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
@@ -173,7 +194,7 @@ class MainActivity : AppCompatActivity() {
 
         // Image analysis - match preview resolution
         val imageAnalyzer = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(240, 180))  // Reduced for performance
+            .setTargetResolution(targetResolution)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also {
@@ -196,6 +217,9 @@ class MainActivity : AppCompatActivity() {
                 preview,
                 imageAnalyzer
             )
+
+            // ← ADDED: Notify overlay which camera is active
+            overlayView.setCameraFacing(currentCameraFacing)
 
             Log.d(TAG, "Camera bound: ${if (useFrontCamera) "Front" else "Back"}")
 
@@ -249,8 +273,8 @@ class MainActivity : AppCompatActivity() {
                                 updateOverlay(
                                     result,
                                     fps,
-                                    imageProxy.width,
-                                    imageProxy.height,
+                                    imageProxy.width,   // Already passing correctly ✓
+                                    imageProxy.height,  // Already passing correctly ✓
                                     imageRotation,
                                     useFrontCamera
                                 )
@@ -354,8 +378,8 @@ class MainActivity : AppCompatActivity() {
                 frameCount = frameCount,
                 bufferSize = gestureRecognizer?.getBufferSize() ?: 0,
                 handDetected = landmarks != null,
-                imageWidth = imageWidth,
-                imageHeight = imageHeight,
+                imageWidth = imageWidth,    // Passing actual camera frame dimensions ✓
+                imageHeight = imageHeight,  // Passing actual camera frame dimensions ✓
                 rotation = rotation,
                 mirrorHorizontal = useFrontCamera
             )
