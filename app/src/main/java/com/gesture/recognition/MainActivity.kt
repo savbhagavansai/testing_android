@@ -183,7 +183,8 @@ class MainActivity : AppCompatActivity() {
         // ← CHANGED: Increased resolution to 640x480 (from 240x180) -- now we changed resolution to 256x256
         // This is optimal for MediaPipe - fast enough but good quality
         //val targetResolution = Size(256, 256)
-        val targetResolution = Size(320, 240)
+        //val targetResolution = Size(320, 240)
+        val targetResolution = Size(480, 360)
 
         // Preview
         val preview = Preview.Builder()
