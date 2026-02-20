@@ -53,7 +53,7 @@ object Config {
     const val MP_HANDS_TRACKING_CONFIDENCE = 0.5f
 
     // ONNX Model Settings
-    const val ONNX_MODEL_FILENAME = "gesture_model.onnx"
+    const val ONNX_MODEL_FILENAME = "gesture_model_android.onnx"
 
     // Prediction Smoothing
     const val PREDICTION_SMOOTHING_WINDOW = 5
